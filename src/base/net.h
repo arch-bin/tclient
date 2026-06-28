@@ -250,6 +250,70 @@ int net_socket_read_wait(NETSOCKET sock, std::chrono::nanoseconds nanoseconds);
  */
 
 /**
+ * @ingroup Network-UDP
+ *
+ * Status of the global proxy used for UDP sockets.
+ */
+enum
+{
+	NET_PROXY_OFF = 0, // No proxy configured
+	NET_PROXY_ACTIVE, // Proxy ready (SOCKS5 UDP ASSOCIATE established, or Shadowsocks set up)
+	NET_PROXY_FAILED, // Proxy configured but setup failed (traffic goes direct)
+};
+
+/**
+ * @ingroup Network-UDP
+ *
+ * Proxy protocol used by net_proxy_set().
+ */
+enum
+{
+	NET_PROXY_TYPE_SOCKS5 = 0, // SOCKS5 with UDP ASSOCIATE (RFC 1928)
+	NET_PROXY_TYPE_SHADOWSOCKS, // Shadowsocks AEAD UDP relay
+};
+
+/**
+ * Configures a global proxy for UDP sockets (TClient).
+ *
+ * When enabled, every UDP socket created afterwards relays all of its UDP traffic
+ * through the proxy: SOCKS5 opens a control connection and performs a UDP ASSOCIATE,
+ * Shadowsocks encrypts each datagram with the configured AEAD cipher.
+ *
+ * @ingroup Network-UDP
+ *
+ * @param type Proxy protocol (one of the `NET_PROXY_TYPE_*` values).
+ * @param enabled Whether the proxy should be used.
+ * @param proxy_addr Address (host + port) of the proxy server.
+ * @param username SOCKS5 username, or an empty string / `nullptr` for no authentication (unused for Shadowsocks).
+ * @param password SOCKS5 auth password or Shadowsocks password.
+ * @param method Shadowsocks cipher name (e.g. "chacha20-ietf-poly1305"); ignored for SOCKS5.
+ */
+void net_proxy_set(int type, int enabled, const NETADDR *proxy_addr, const char *username, const char *password, const char *method);
+
+/**
+ * Returns the current proxy status (one of the `NET_PROXY_*` values).
+ *
+ * @ingroup Network-UDP
+ */
+int net_proxy_status();
+
+/**
+ * Measures the TCP round-trip time to an address (TClient, used for proxy ping).
+ *
+ * Opens a non-blocking TCP connection to @p addr and times how long the handshake
+ * takes. Works for any host that accepts TCP on that port (SOCKS5 proxies always do;
+ * UDP-only Shadowsocks servers do not, in which case this reports unreachable).
+ *
+ * @ingroup Network-General
+ *
+ * @param addr Address (host + port) to ping.
+ * @param timeout_ms How long to wait for the connection in milliseconds.
+ *
+ * @return The round-trip time in milliseconds, or `-1` if unreachable / timed out.
+ */
+int net_tcp_ping(const NETADDR *addr, int timeout_ms);
+
+/**
  * Creates a UDP socket and binds it to a port.
  *
  * @ingroup Network-UDP

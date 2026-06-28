@@ -1112,6 +1112,24 @@ void CClient::Quit()
 	SetState(IClient::STATE_QUITTING);
 }
 
+void CClient::ConfigureSocks5()
+{
+	// TClient: resolve the configured proxy and hand it to the net layer. Sockets created
+	// afterwards (in InitNetworkClientImpl) pick it up and set up the relay.
+	if(g_Config.m_TcSocks5 && g_Config.m_TcSocks5Host[0] != '\0')
+	{
+		NETADDR ProxyAddr;
+		if(net_host_lookup(g_Config.m_TcSocks5Host, &ProxyAddr, NETTYPE_IPV4 | NETTYPE_IPV6) == 0)
+		{
+			ProxyAddr.port = g_Config.m_TcSocks5Port;
+			net_proxy_set(g_Config.m_TcSocks5Type, 1, &ProxyAddr, g_Config.m_TcSocks5User, g_Config.m_TcSocks5Pass, g_Config.m_TcSocks5Method);
+			return;
+		}
+		log_error("proxy", "could not resolve proxy host '%s'", g_Config.m_TcSocks5Host);
+	}
+	net_proxy_set(0, 0, nullptr, nullptr, nullptr, nullptr);
+}
+
 void CClient::ResetSocket()
 {
 	NETADDR BindAddr;
@@ -1125,6 +1143,7 @@ void CClient::ResetSocket()
 		return;
 	}
 	BindAddr.type = NETTYPE_ALL;
+	ConfigureSocks5();
 	for(size_t Conn = 0; Conn < std::size(m_aNetClient); Conn++)
 	{
 		char aError[256];
@@ -3528,6 +3547,7 @@ bool CClient::InitNetworkClient(char *pError, size_t ErrorSize)
 		return false;
 	}
 	BindAddr.type = NETTYPE_ALL;
+	ConfigureSocks5();
 	for(size_t i = 0; i < std::size(m_aNetClient); i++)
 	{
 		if(!InitNetworkClientImpl(BindAddr, i, pError, ErrorSize))
@@ -4597,6 +4617,9 @@ void CClient::RegisterCommands()
 	m_pConsole->Chain("cl_dummy_port", ConchainNetReset, this);
 	m_pConsole->Chain("cl_contact_port", ConchainNetReset, this);
 	m_pConsole->Chain("bindaddr", ConchainNetReset, this);
+	// TClient: re-open the sockets when the proxy is toggled or its protocol changes
+	m_pConsole->Chain("tc_socks5", ConchainNetReset, this);
+	m_pConsole->Chain("tc_socks5_type", ConchainNetReset, this);
 
 	m_pConsole->Chain("password", ConchainPassword, this);
 

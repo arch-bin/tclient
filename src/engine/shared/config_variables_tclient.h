@@ -278,6 +278,71 @@ MACRO_CONFIG_INT(TcUiShowTClient, tc_ui_show_tclient, 1, 0, 1, CFGFLAG_CLIENT | 
 MACRO_CONFIG_INT(TcUiOnlyModified, tc_ui_only_modified, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Show only modified settings in Configs tab")
 MACRO_CONFIG_INT(TcUiCompactList, tc_ui_compact_list, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Use compact row layout in Configs tab")
 
+// Anti-Void
+MACRO_CONFIG_INT(TcAntiVoid, tc_anti_void, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Brake (counter-strafe) and release hook when your trajectory leads into death/freeze/deep/live freeze tiles (checks both game and front layer)")
+MACRO_CONFIG_INT(TcAntiVoidDistance, tc_anti_void_distance, 48, 4, 320, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Vertical/hook trigger distance in pixels for anti-void (tc_anti_void); 32px = 1 tile. Used for releasing the hook when void is above")
+MACRO_CONFIG_INT(TcAntiVoidSideDistance, tc_anti_void_side_distance, 32, 0, 320, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Horizontal (side) trigger distance in pixels for anti-void braking; 32px = 1 tile. Lower = less strict (reacts closer to the void). Higher speed extends it further")
+MACRO_CONFIG_INT(TcAntiVoidVertical, tc_anti_void_vertical, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Anti-void vertical half: release the hook (and block jump) when it would pull your head up into a freeze/death ceiling. Turn off to keep only the sideways (horizontal) braking")
+// Anti-void: which tile types to avoid (all on by default = original behaviour)
+MACRO_CONFIG_INT(TcAntiVoidDeath, tc_anti_void_death, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Anti-void avoids death (kill) tiles")
+MACRO_CONFIG_INT(TcAntiVoidFreeze, tc_anti_void_freeze, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Anti-void avoids freeze tiles")
+MACRO_CONFIG_INT(TcAntiVoidDeepFreeze, tc_anti_void_deep_freeze, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Anti-void avoids deep freeze tiles")
+MACRO_CONFIG_INT(TcAntiVoidLiveFreeze, tc_anti_void_live_freeze, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Anti-void avoids live freeze tiles")
+// Anti-void: optional extra behaviours (all off by default)
+MACRO_CONFIG_INT(TcAntiVoidFallProtection, tc_anti_void_fall_protection, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Anti-void: predict fall trajectory (velocity + gravity) and brake so you don't run/fall off a ledge into the void below")
+MACRO_CONFIG_INT(TcAntiVoidBlockJump, tc_anti_void_block_jump, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Anti-void: block jump when it would launch your head into a freeze/death ceiling above")
+MACRO_CONFIG_INT(TcAntiVoidTrajectory, tc_anti_void_trajectory, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Anti-void: sample along the whole path instead of single points (catches thin void strips at high speed)")
+MACRO_CONFIG_INT(TcAntiVoidSmoothing, tc_anti_void_smoothing, 0, 0, 20, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Anti-void: keep braking for this many extra ticks after danger clears, to reduce on/off jitter on the edge (0 = off)")
+// Anti-void: auto-disable in narrow/tight spots so it doesn't fight you in corridors
+MACRO_CONFIG_INT(TcAntiVoidNarrowDisable, tc_anti_void_narrow_disable, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Anti-void: automatically disable while you are in a narrow/tight spot (so it doesn't keep braking you inside corridors)")
+MACRO_CONFIG_INT(TcAntiVoidNarrowWidth, tc_anti_void_narrow_width, 2, 1, 20, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Anti-void narrow: horizontal threshold in tiles. If the free corridor around you is this wide or narrower, anti-void turns off")
+MACRO_CONFIG_INT(TcAntiVoidNarrowHeight, tc_anti_void_narrow_height, 2, 1, 20, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Anti-void narrow: vertical threshold in tiles. If the free corridor around you is this tall or shorter, anti-void turns off")
+MACRO_CONFIG_INT(TcAntiVoidShow, tc_anti_void_show, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Anti-void: draw a visual overlay of the sample points and dangerous tiles around you")
+MACRO_CONFIG_INT(TcAntiVoidDebug, tc_anti_void_debug, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Anti-void: print a console/log line whenever it starts/stops braking")
+// Anti-void: rocket (grenade) counter
+MACRO_CONFIG_INT(TcAntiVoidRocket, tc_anti_void_rocket, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Anti-void: if you have the grenade launcher, auto-fire a rocket toward the void so the explosion knocks you back to safety (works for falling down, flying up, or drifting sideways)")
+MACRO_CONFIG_INT(TcAntiVoidRocketDistance, tc_anti_void_rocket_distance, 600, 1, 3200, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Anti-void rocket: how close to the void before it fires (the firing 'timing'), stored in tenths of a pixel so 10 = 1px (320px = 1 tile is value 320); min 1 = 0.1px for very tight timing")
+MACRO_CONFIG_INT(TcAntiVoidRocketCooldown, tc_anti_void_rocket_cooldown, 15, 1, 100, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Anti-void rocket: minimum ticks between auto-fired rockets so it doesn't dump all your ammo at once")
+MACRO_CONFIG_INT(TcAntiVoidRocketAimVoid, tc_anti_void_rocket_aim_void, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Anti-void rocket aiming: 1 = aim at the nearest void in the direction you're moving (fires up at a ceiling void even while drifting sideways); 0 = fire straight along your velocity vector (inertia)")
+
+// Weapon spinner (visual only, off by default; does NOT affect aim/hook/fire)
+MACRO_CONFIG_INT(TcWeaponSpin, tc_weapon_spin, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Visually spin the weapon sprite (cosmetic only, does not affect your real aim, hook or fire direction)")
+MACRO_CONFIG_INT(TcWeaponSpinMode, tc_weapon_spin_mode, 0, 0, 7, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Weapon spinner mode: 0=spin CW, 1=spin CCW, 2=pendulum, 3=random flicks, 4=jitter, 5=snap 8-dir, 6=random drift, 7=chaos")
+MACRO_CONFIG_INT(TcWeaponSpinSpeed, tc_weapon_spin_speed, 60, 0, 500, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Weapon spinner: rotation speed / mode rate")
+MACRO_CONFIG_INT(TcWeaponSpinRandom, tc_weapon_spin_random, 0, 0, 100, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Weapon spinner: amount of random erratic motion added on top of the spin (0 = smooth spin)")
+MACRO_CONFIG_INT(TcWeaponSpinOthers, tc_weapon_spin_others, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Weapon spinner: also spin other players' weapons (visual only on your screen)")
+MACRO_CONFIG_INT(TcWeaponSpinReal, tc_weapon_spin_real, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Weapon spinner: send the spinning aim to the server so OTHER players also see your weapon spinning. Real aim is kept on the exact ticks you hook or fire so those still go where you point")
+
+// Hook Aim
+MACRO_CONFIG_INT(TcHookAim, tc_hook_aim, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "When hooking, snap aim toward the nearest player within tc_hook_aim_angle degrees")
+MACRO_CONFIG_INT(TcHookAimAngle, tc_hook_aim_angle, 30, 1, 180, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Maximum angle in degrees to snap the hook toward a nearby player (requires tc_hook_aim)")
+
+// Balancer: when a nearby tee is hovering over the void, auto-correct your left/right movement so you sit
+// perfectly centered on top of their head instead of sliding off the rounded hitbox.
+MACRO_CONFIG_INT(TcBalancer, tc_balancer, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Balancer: while standing on a tee that is over the void, only when you start to slide off the head it nudges you back to center so you don't fall in. Does nothing when the tee is not over the void, and leaves your movement free while you are not near the edge (bindable via tc_balancer_toggle)")
+MACRO_CONFIG_INT(TcBalancerDistance, tc_balancer_distance, 96, 16, 640, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Balancer: max distance in pixels to the tee you are balancing on for the balancer to engage (32px = 1 tile)")
+MACRO_CONFIG_INT(TcBalancerEdge, tc_balancer_edge, 16, 0, 28, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Balancer: how far off-center (pixels) you may drift on the head before the balancer steers you back. Smaller = earlier/stricter rescue, larger = more freedom; inside this zone your movement is untouched (head radius is 28px)")
+MACRO_CONFIG_INT(TcBalancerVoidDepth, tc_balancer_void_depth, 8, 1, 40, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Balancer: how many tiles below the tee to scan when deciding if it is 'in the void'. The tee counts as in the void unless safe solid ground is found within this depth (death/freeze tiles or the map edge count as void)")
+MACRO_CONFIG_INT(TcBalancerOnlyAbove, tc_balancer_only_above, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Balancer: only engage when you are above the tee, so you balance on their head instead of being dragged sideways")
+MACRO_CONFIG_INT(TcBalancerDisableRocket, tc_balancer_disable_rocket, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Balancer: while the balancer is engaged on a tee, suppress the rocket anti-void (tc_anti_void_rocket) so an auto-fired rocket doesn't blow you off the head")
+MACRO_CONFIG_INT(TcBalancerDebug, tc_balancer_debug, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Balancer: log to console when it locks onto an in-void tee and when it rescues you, to help tuning")
+
+// Safety while chatting: the server ignores movement/fire from a player whose input is flagged as chatting,
+// so the safety features (anti-void/balancer/rocket) normally stop working the moment you open the chat.
+// When this is on, the client sends the input as 'playing' instead while a safety feature is enabled, so they
+// keep working while you type. Side effect: others won't see your "typing" bubble while a safety feature is on.
+MACRO_CONFIG_INT(TcSafetyInChat, tc_safety_in_chat, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Keep the safety features (anti-void/balancer/rocket) working while the chat is open (sends input as playing; hides your typing bubble while a safety feature is on)")
+
+// Proxy: route the game's UDP traffic for joining servers through a proxy.
+// SOCKS5 needs a proxy that supports UDP ASSOCIATE (RFC 1928); Shadowsocks uses AEAD UDP relay.
+MACRO_CONFIG_INT(TcSocks5, tc_socks5, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Route the game connection through a proxy (see tc_socks5_type). Apply with net_reset")
+MACRO_CONFIG_INT(TcSocks5Type, tc_socks5_type, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Proxy protocol: 0 = SOCKS5 (UDP ASSOCIATE), 1 = Shadowsocks (AEAD)")
+MACRO_CONFIG_STR(TcSocks5Host, tc_socks5_host, 128, "", CFGFLAG_CLIENT | CFGFLAG_SAVE, "Proxy host (ip address or domain)")
+MACRO_CONFIG_INT(TcSocks5Port, tc_socks5_port, 1080, 1, 65535, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Proxy port")
+MACRO_CONFIG_STR(TcSocks5User, tc_socks5_user, 64, "", CFGFLAG_CLIENT | CFGFLAG_SAVE, "SOCKS5 username (leave empty for no authentication; unused for Shadowsocks)")
+MACRO_CONFIG_STR(TcSocks5Pass, tc_socks5_pass, 64, "", CFGFLAG_CLIENT | CFGFLAG_SAVE, "Proxy password (SOCKS5 auth password or Shadowsocks password)")
+MACRO_CONFIG_STR(TcSocks5Method, tc_socks5_method, 32, "chacha20-ietf-poly1305", CFGFLAG_CLIENT | CFGFLAG_SAVE, "Shadowsocks cipher: chacha20-ietf-poly1305, aes-256-gcm or aes-128-gcm")
+
 // Dummy Info
 MACRO_CONFIG_INT(TcShowhudDummyPosition, tc_showhud_dummy_position, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Show ingame HUD (Dummy Position)")
 MACRO_CONFIG_INT(TcShowhudDummySpeed, tc_showhud_dummy_speed, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Show ingame HUD (Dummy Speed)")

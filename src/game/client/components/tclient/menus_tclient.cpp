@@ -1,5 +1,6 @@
 #include <base/log.h>
 #include <base/math.h>
+#include <base/net.h>
 #include <base/system.h>
 #include <base/types.h>
 
@@ -34,7 +35,9 @@
 
 #include <algorithm>
 #include <string>
+#include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 enum
@@ -2947,4 +2950,808 @@ void CMenus::RenderSettingsTClientConfigs(CUIRect MainView)
 	CUIRect EndPad{Content.x, Content.y, Content.w, 5.0f};
 	s_ScrollRegion.AddRect(EndPad);
 	s_ScrollRegion.End();
+}
+
+// ***** My Fork: own top-level page, one tab per feature ***** //
+
+enum
+{
+	MYFORK_TAB_ANTIVOID = 0,
+	MYFORK_TAB_WEAPONSPIN,
+	MYFORK_TAB_HOOKAIM,
+	MYFORK_TAB_BALANCER,
+	MYFORK_TAB_CHATSAFETY,
+	MYFORK_TAB_SOCKS5,
+	NUMBER_OF_MYFORK_TABS
+};
+
+// Shared layout helpers for the My Fork tabs, so every section looks identical.
+// Begins a single-column scroll region inside MainView.
+static void MyForkBeginColumn(CScrollRegion *pScrollRegion, CUIRect MainView, CUIRect *pColumn)
+{
+	vec2 ScrollOffset(0.0f, 0.0f);
+	CScrollRegionParams ScrollParams;
+	ScrollParams.m_ScrollUnit = 60.0f;
+	ScrollParams.m_Flags = CScrollRegionParams::FLAG_CONTENT_STATIC_WIDTH;
+	ScrollParams.m_ScrollbarMargin = 5.0f;
+	pScrollRegion->Begin(&MainView, &ScrollOffset, &ScrollParams);
+	MainView.y += ScrollOffset.y;
+	MainView.VSplitRight(5.0f, &MainView, nullptr);
+	MainView.VSplitLeft(10.0f, nullptr, pColumn);
+}
+
+// Finishes the scroll region. After all HSplitTop calls, Column.y sits at the bottom of
+// the content; the rect passed to AddRect must have height 0 so the region measures the
+// real content height (passing the leftover Column would report the full clip height and
+// the scrollbar would never activate).
+static void MyForkEndColumn(CScrollRegion *pScrollRegion, CUIRect Column)
+{
+	Column.h = 0.0f;
+	pScrollRegion->AddRect(Column);
+	pScrollRegion->End();
+}
+
+void CMenus::RenderSettingsMyFork(CUIRect MainView)
+{
+	static int s_CurForkTab = 0;
+
+	CUIRect TabBar, Button;
+	MainView.HSplitTop(LineSize, &TabBar, &MainView);
+
+	static CButtonContainer s_aForkTabs[NUMBER_OF_MYFORK_TABS] = {};
+	const char *apTabNames[] = {
+		"Анти-войд",
+		"Крутилка оружия",
+		"Наведение крюка",
+		"Балансер",
+		"Защита в чате",
+		"Прокси"};
+
+	const float TabWidth = TabBar.w / (float)NUMBER_OF_MYFORK_TABS;
+	for(int Tab = 0; Tab < NUMBER_OF_MYFORK_TABS; ++Tab)
+	{
+		TabBar.VSplitLeft(TabWidth, &Button, &TabBar);
+		const int Corners = Tab == 0 ? IGraphics::CORNER_L : Tab == NUMBER_OF_MYFORK_TABS - 1 ? IGraphics::CORNER_R :
+														 IGraphics::CORNER_NONE;
+		if(DoButton_MenuTab(&s_aForkTabs[Tab], apTabNames[Tab], s_CurForkTab == Tab, &Button, Corners, nullptr, nullptr, nullptr, nullptr, 4.0f))
+			s_CurForkTab = Tab;
+	}
+
+	MainView.HSplitTop(Margin, nullptr, &MainView);
+
+	if(s_CurForkTab == MYFORK_TAB_ANTIVOID)
+		RenderSettingsMyForkAntiVoid(MainView);
+	else if(s_CurForkTab == MYFORK_TAB_WEAPONSPIN)
+		RenderSettingsMyForkWeaponSpin(MainView);
+	else if(s_CurForkTab == MYFORK_TAB_HOOKAIM)
+		RenderSettingsMyForkHookAim(MainView);
+	else if(s_CurForkTab == MYFORK_TAB_BALANCER)
+		RenderSettingsMyForkBalancer(MainView);
+	else if(s_CurForkTab == MYFORK_TAB_CHATSAFETY)
+		RenderSettingsMyForkChatSafety(MainView);
+	else if(s_CurForkTab == MYFORK_TAB_SOCKS5)
+		RenderSettingsMyForkSocks5(MainView);
+}
+
+void CMenus::RenderSettingsMyForkChatSafety(CUIRect MainView)
+{
+	CUIRect Column, Label;
+	static CScrollRegion s_ScrollRegion;
+	MyForkBeginColumn(&s_ScrollRegion, MainView, &Column);
+
+	auto Section = [&](const char *pTitle, const char *pDesc) {
+		Column.HSplitTop(Margin, nullptr, &Column);
+		Column.HSplitTop(HeadlineHeight, &Label, &Column);
+		Ui()->DoLabel(&Label, pTitle, HeadlineFontSize, TEXTALIGN_ML);
+		Column.HSplitTop(MarginSmall, nullptr, &Column);
+		if(pDesc && pDesc[0])
+		{
+			Column.HSplitTop(LineSize * 0.85f, &Label, &Column);
+			TextRender()->TextColor(0.55f, 0.6f, 0.65f, 1.0f);
+			Ui()->DoLabel(&Label, pDesc, FontSize * 0.8f, TEXTALIGN_ML);
+			TextRender()->TextColor(TextRender()->DefaultTextColor());
+			Column.HSplitTop(MarginExtraSmall, nullptr, &Column);
+		}
+	};
+
+	Section("Защита в чате", "Сервер игнорирует движение и стрельбу, пока у вас открыт чат, поэтому анти-войд, балансер и ракета обычно перестают работать, как только вы начинаете печатать. С этой опцией клиент, пока включена любая из защит, шлёт ввод как «в игре» — и защиты продолжают работать в чате.");
+	DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcSafetyInChat, "Защиты работают, пока открыт чат", &g_Config.m_TcSafetyInChat, &Column, LineSize);
+
+	Section("Учтите", "Побочный эффект: пока включена любая защита, другие игроки не увидят «пузырь», что вы печатаете в чате. На меню это не влияет — там защиты работают и так.");
+
+	Section("Бинд", "Назначьте клавишу для быстрого вкл/выкл.");
+	static CButtonContainer s_ReaderChatSafety, s_ClearChatSafety;
+	DoLine_KeyReader(Column, s_ReaderChatSafety, s_ClearChatSafety, "Клавиша вкл/выкл защиты в чате", "toggle tc_safety_in_chat 0 1");
+
+	MyForkEndColumn(&s_ScrollRegion, Column);
+}
+
+void CMenus::RenderSettingsMyForkHookAim(CUIRect MainView)
+{
+	CUIRect Column, Label, Button;
+	static CScrollRegion s_ScrollRegion;
+	MyForkBeginColumn(&s_ScrollRegion, MainView, &Column);
+
+	auto Section = [&](const char *pTitle, const char *pDesc) {
+		Column.HSplitTop(Margin, nullptr, &Column);
+		Column.HSplitTop(HeadlineHeight, &Label, &Column);
+		Ui()->DoLabel(&Label, pTitle, HeadlineFontSize, TEXTALIGN_ML);
+		Column.HSplitTop(MarginSmall, nullptr, &Column);
+		if(pDesc && pDesc[0])
+		{
+			Column.HSplitTop(LineSize * 0.85f, &Label, &Column);
+			TextRender()->TextColor(0.55f, 0.6f, 0.65f, 1.0f);
+			Ui()->DoLabel(&Label, pDesc, FontSize * 0.8f, TEXTALIGN_ML);
+			TextRender()->TextColor(TextRender()->DefaultTextColor());
+			Column.HSplitTop(MarginExtraSmall, nullptr, &Column);
+		}
+	};
+
+	Section("Наведение крюка", "При зажатом крюке подводит прицел к ближайшему игроку в пределах досягаемости и прямой видимости.");
+	DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcHookAim, "Включить наведение крюка", &g_Config.m_TcHookAim, &Column, LineSize);
+	if(g_Config.m_TcHookAim)
+	{
+		Section("Угол наведения", "Максимальный угол в градусах, в пределах которого крюк притянется к игроку.");
+		Column.HSplitTop(LineSize, &Button, &Column);
+		Ui()->DoScrollbarOption(&g_Config.m_TcHookAimAngle, &g_Config.m_TcHookAimAngle, &Button, "Угол наведения", 1, 180, &CUi::ms_LinearScrollbarScale, CUi::SCROLLBAR_OPTION_NOCLAMPVALUE, " °");
+	}
+
+	Section("Бинд", "Назначьте клавишу для быстрого вкл/выкл.");
+	static CButtonContainer s_ReaderHookAim, s_ClearHookAim;
+	DoLine_KeyReader(Column, s_ReaderHookAim, s_ClearHookAim, "Клавиша вкл/выкл наведения крюка", "toggle tc_hook_aim 0 1");
+
+	MyForkEndColumn(&s_ScrollRegion, Column);
+}
+
+void CMenus::RenderSettingsMyForkBalancer(CUIRect MainView)
+{
+	CUIRect Column, Label, Button;
+	static CScrollRegion s_ScrollRegion;
+	MyForkBeginColumn(&s_ScrollRegion, MainView, &Column);
+
+	auto Section = [&](const char *pTitle, const char *pDesc) {
+		Column.HSplitTop(Margin, nullptr, &Column);
+		Column.HSplitTop(HeadlineHeight, &Label, &Column);
+		Ui()->DoLabel(&Label, pTitle, HeadlineFontSize, TEXTALIGN_ML);
+		Column.HSplitTop(MarginSmall, nullptr, &Column);
+		if(pDesc && pDesc[0])
+		{
+			Column.HSplitTop(LineSize * 0.85f, &Label, &Column);
+			TextRender()->TextColor(0.55f, 0.6f, 0.65f, 1.0f);
+			Ui()->DoLabel(&Label, pDesc, FontSize * 0.8f, TEXTALIGN_ML);
+			TextRender()->TextColor(TextRender()->DefaultTextColor());
+			Column.HSplitTop(MarginExtraSmall, nullptr, &Column);
+		}
+	};
+
+	Section("Балансер", "Работает, только когда ти, на котором вы стоите, находится над войдом. Не перехватывает управление: пока вы держитесь на голове, движение свободно, и лишь когда вы начинаете соскальзывать к краю (почти в войд) — подправляет вас обратно к центру.");
+	DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcBalancer, "Включить балансер", &g_Config.m_TcBalancer, &Column, LineSize);
+	if(g_Config.m_TcBalancer)
+	{
+		// Slider that stores pixels but displays the value in tiles (32px = 1 tile).
+		auto DoTileDistanceSlider = [&](int *pConfig, const char *pLabel, int MinPx, int MaxPx) {
+			Column.HSplitTop(LineSize, &Button, &Column);
+			CUIRect SliderLabel, ScrollBar;
+			Button.VSplitMid(&SliderLabel, &ScrollBar, minimum(10.0f, Button.w * 0.05f));
+			char aBuf[128];
+			str_format(aBuf, sizeof(aBuf), "%s: %.2f тайла", pLabel, *pConfig / 32.0f);
+			const float SliderFontSize = SliderLabel.h * CUi::ms_FontmodHeight * 0.8f;
+			Ui()->DoLabel(&SliderLabel, aBuf, SliderFontSize, TEXTALIGN_ML);
+			int Value = std::clamp(*pConfig, MinPx, MaxPx);
+			Value = CUi::ms_LinearScrollbarScale.ToAbsolute(Ui()->DoScrollbarH(pConfig, &ScrollBar, CUi::ms_LinearScrollbarScale.ToRelative(Value, MinPx, MaxPx)), MinPx, MaxPx);
+			*pConfig = Value;
+		};
+
+		Section("Дистанция срабатывания", "Насколько близко должна быть цель, чтобы балансер включился. 32px = 1 тайл.");
+		DoTileDistanceSlider(&g_Config.m_TcBalancerDistance, "Дистанция до цели", 16, 640);
+
+		Section("Условие войда", "Балансер включается, только если под ти нет безопасной земли в пределах этой глубины (тайлы смерти/фриза или край карты = войд).");
+		Column.HSplitTop(LineSize, &Button, &Column);
+		Ui()->DoScrollbarOption(&g_Config.m_TcBalancerVoidDepth, &g_Config.m_TcBalancerVoidDepth, &Button, "Глубина проверки войда", 1, 40, &CUi::ms_LinearScrollbarScale, CUi::SCROLLBAR_OPTION_NOCLAMPVALUE, " тайла");
+
+		Section("Спасение у края", "Насколько можно отъехать от центра головы, прежде чем балансер вернёт вас. Меньше = спасает раньше/строже, больше = больше свободы (радиус головы ~28px).");
+		Column.HSplitTop(LineSize, &Button, &Column);
+		Ui()->DoScrollbarOption(&g_Config.m_TcBalancerEdge, &g_Config.m_TcBalancerEdge, &Button, "Порог края", 0, 28, &CUi::ms_LinearScrollbarScale, CUi::SCROLLBAR_OPTION_NOCLAMPVALUE, " px");
+
+		Section("Поведение", "Когда балансеру разрешено цепляться к цели.");
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcBalancerOnlyAbove, "Только когда вы выше цели (на голове)", &g_Config.m_TcBalancerOnlyAbove, &Column, LineSize);
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcBalancerDisableRocket, "Отключать ракетный анти-войд, пока работает балансер", &g_Config.m_TcBalancerDisableRocket, &Column, LineSize);
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcBalancerDebug, "Логировать в консоль (для настройки)", &g_Config.m_TcBalancerDebug, &Column, LineSize);
+
+		Section("Бинд", "Назначьте клавишу для быстрого вкл/выкл.");
+		static CButtonContainer s_ReaderBalancer, s_ClearBalancer;
+		DoLine_KeyReader(Column, s_ReaderBalancer, s_ClearBalancer, "Клавиша вкл/выкл балансера", "tc_balancer_toggle");
+	}
+
+	MyForkEndColumn(&s_ScrollRegion, Column);
+}
+
+void CMenus::RenderSettingsMyForkAntiVoid(CUIRect MainView)
+{
+	CUIRect Column, Label, Button;
+	static CScrollRegion s_ScrollRegion;
+	MyForkBeginColumn(&s_ScrollRegion, MainView, &Column);
+
+	// Section header with an optional muted one-line description underneath.
+	auto Section = [&](const char *pTitle, const char *pDesc) {
+		Column.HSplitTop(Margin, nullptr, &Column);
+		Column.HSplitTop(HeadlineHeight, &Label, &Column);
+		Ui()->DoLabel(&Label, pTitle, HeadlineFontSize, TEXTALIGN_ML);
+		Column.HSplitTop(MarginSmall, nullptr, &Column);
+		if(pDesc && pDesc[0])
+		{
+			Column.HSplitTop(LineSize * 0.85f, &Label, &Column);
+			TextRender()->TextColor(0.55f, 0.6f, 0.65f, 1.0f);
+			Ui()->DoLabel(&Label, pDesc, FontSize * 0.8f, TEXTALIGN_ML);
+			TextRender()->TextColor(TextRender()->DefaultTextColor());
+			Column.HSplitTop(MarginExtraSmall, nullptr, &Column);
+		}
+	};
+
+	Section("Анти-войд", "Тормозит (контр-страйф) и отпускает крюк, когда траектория ведёт в смерть/фриз.");
+	DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoid, "Включить анти-войд", &g_Config.m_TcAntiVoid, &Column, LineSize);
+	if(g_Config.m_TcAntiVoid)
+	{
+		// Slider that stores pixels but displays the value in tiles (allows sub-tile distances, 32px = 1 tile)
+		auto DoTileDistanceSlider = [&](int *pConfig, const char *pLabel, int MinPx, int MaxPx) {
+			Column.HSplitTop(LineSize, &Button, &Column);
+			CUIRect SliderLabel, ScrollBar;
+			Button.VSplitMid(&SliderLabel, &ScrollBar, minimum(10.0f, Button.w * 0.05f));
+			char aBuf[128];
+			str_format(aBuf, sizeof(aBuf), "%s: %.2f тайла", pLabel, *pConfig / 32.0f);
+			const float SliderFontSize = SliderLabel.h * CUi::ms_FontmodHeight * 0.8f;
+			Ui()->DoLabel(&SliderLabel, aBuf, SliderFontSize, TEXTALIGN_ML);
+			int Value = std::clamp(*pConfig, MinPx, MaxPx);
+			Value = CUi::ms_LinearScrollbarScale.ToAbsolute(Ui()->DoScrollbarH(pConfig, &ScrollBar, CUi::ms_LinearScrollbarScale.ToRelative(Value, MinPx, MaxPx)), MinPx, MaxPx);
+			*pConfig = Value;
+		};
+
+		Section("Дистанции срабатывания", "32 пикселя = 1 тайл. Меньше = реагирует ближе к войду.");
+		DoTileDistanceSlider(&g_Config.m_TcAntiVoidSideDistance, "Боковая дистанция", 0, 320);
+		DoTileDistanceSlider(&g_Config.m_TcAntiVoidDistance, "Дистанция вверх/хук", 4, 320);
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoidVertical, "Вертикальный анти-войд (отпускать крюк/блок прыжка в потолок). Выкл = только боковой", &g_Config.m_TcAntiVoidVertical, &Column, LineSize);
+
+		Section("Типы тайлов для избегания", "Какие опасные тайлы учитывать (по умолчанию все).");
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoidDeath, "Тайлы смерти (kill)", &g_Config.m_TcAntiVoidDeath, &Column, LineSize);
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoidFreeze, "Тайлы фриза", &g_Config.m_TcAntiVoidFreeze, &Column, LineSize);
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoidDeepFreeze, "Тайлы глубокого фриза (deep)", &g_Config.m_TcAntiVoidDeepFreeze, &Column, LineSize);
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoidLiveFreeze, "Тайлы живого фриза (live)", &g_Config.m_TcAntiVoidLiveFreeze, &Column, LineSize);
+
+		Section("Доп. поведение", "Опционально (по умолчанию выключено).");
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoidFallProtection, "Защита от падения (не сбежать с края в войд)", &g_Config.m_TcAntiVoidFallProtection, &Column, LineSize);
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoidBlockJump, "Блокировать прыжок в потолок фриз/смерть", &g_Config.m_TcAntiVoidBlockJump, &Column, LineSize);
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoidTrajectory, "Сэмплить весь путь (ловит тонкий войд на скорости)", &g_Config.m_TcAntiVoidTrajectory, &Column, LineSize);
+		Column.HSplitTop(LineSize, &Button, &Column);
+		Ui()->DoScrollbarOption(&g_Config.m_TcAntiVoidSmoothing, &g_Config.m_TcAntiVoidSmoothing, &Button, "Удержание (анти-дёрганье)", 0, 20, &CUi::ms_LinearScrollbarScale, CUi::SCROLLBAR_OPTION_NOCLAMPVALUE, " тиков");
+
+		Section("Узкие места", "Авто-отключение в тесных коридорах, чтобы анти-войд не мешал.");
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoidNarrowDisable, "Отключать в узких местах", &g_Config.m_TcAntiVoidNarrowDisable, &Column, LineSize);
+		if(g_Config.m_TcAntiVoidNarrowDisable)
+		{
+			Column.HSplitTop(LineSize, &Button, &Column);
+			Ui()->DoScrollbarOption(&g_Config.m_TcAntiVoidNarrowWidth, &g_Config.m_TcAntiVoidNarrowWidth, &Button, "Ширина по горизонтали", 1, 20, &CUi::ms_LinearScrollbarScale, CUi::SCROLLBAR_OPTION_NOCLAMPVALUE, " тайла");
+			Column.HSplitTop(LineSize, &Button, &Column);
+			Ui()->DoScrollbarOption(&g_Config.m_TcAntiVoidNarrowHeight, &g_Config.m_TcAntiVoidNarrowHeight, &Button, "Высота по вертикали", 1, 20, &CUi::ms_LinearScrollbarScale, CUi::SCROLLBAR_OPTION_NOCLAMPVALUE, " тайла");
+		}
+
+		Section("Отладка", "Визуализация и логи для настройки.");
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoidShow, "Показать оверлей (опасные тайлы + точки)", &g_Config.m_TcAntiVoidShow, &Column, LineSize);
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoidDebug, "Логировать торможение в консоль", &g_Config.m_TcAntiVoidDebug, &Column, LineSize);
+
+		Section("Бинд", "Назначьте клавишу для быстрого вкл/выкл.");
+		static CButtonContainer s_ReaderButtonAntiVoid, s_ClearButtonAntiVoid;
+		DoLine_KeyReader(Column, s_ReaderButtonAntiVoid, s_ClearButtonAntiVoid, "Клавиша вкл/выкл анти-войда", "tc_anti_void_toggle");
+	}
+
+	// Rocket counter is a SEPARATE feature: it works even when the braking anti-void above is off.
+	Section("Ракета (контр-войд)", "Отдельно от обычного анти-войда. Если в инвентаре есть гранатомёт, стреляет ракетой по направлению полёта в войд — взрыв отбрасывает обратно. Работает даже если обычный анти-войд выключен.");
+	DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoidRocket, "Контрить войд ракетой", &g_Config.m_TcAntiVoidRocket, &Column, LineSize);
+	if(g_Config.m_TcAntiVoidRocket)
+	{
+		{
+			// Stored in tenths of a pixel so it can go as low as 0.1px for very tight timing.
+			Column.HSplitTop(LineSize, &Button, &Column);
+			CUIRect SliderLabel, ScrollBar;
+			Button.VSplitMid(&SliderLabel, &ScrollBar, minimum(10.0f, Button.w * 0.05f));
+			char aBuf[128];
+			str_format(aBuf, sizeof(aBuf), "Дистанция выстрела (тайминг): %.1f px", g_Config.m_TcAntiVoidRocketDistance / 10.0f);
+			const float SliderFontSize = SliderLabel.h * CUi::ms_FontmodHeight * 0.8f;
+			Ui()->DoLabel(&SliderLabel, aBuf, SliderFontSize, TEXTALIGN_ML);
+			int Value = std::clamp(g_Config.m_TcAntiVoidRocketDistance, 1, 3200);
+			Value = CUi::ms_LinearScrollbarScale.ToAbsolute(Ui()->DoScrollbarH(&g_Config.m_TcAntiVoidRocketDistance, &ScrollBar, CUi::ms_LinearScrollbarScale.ToRelative(Value, 1, 3200)), 1, 3200);
+			g_Config.m_TcAntiVoidRocketDistance = Value;
+		}
+		Column.HSplitTop(LineSize, &Button, &Column);
+		Ui()->DoScrollbarOption(&g_Config.m_TcAntiVoidRocketCooldown, &g_Config.m_TcAntiVoidRocketCooldown, &Button, "Перезарядка между ракетами", 1, 100, &CUi::ms_LinearScrollbarScale, CUi::SCROLLBAR_OPTION_NOCLAMPVALUE, " тиков");
+
+		Section("Прицеливание ракеты", "Куда стрелять: в ближайший войд по ходу движения (вкл) или строго по вектору скорости (выкл).");
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoidRocketAimVoid, "Целить в ближайший войд (а не по инерции)", &g_Config.m_TcAntiVoidRocketAimVoid, &Column, LineSize);
+
+		Section("Бинд ракеты", "Клавиша для быстрого вкл/выкл ракетного контр-войда.");
+		static CButtonContainer s_ReaderButtonRocket, s_ClearButtonRocket;
+		DoLine_KeyReader(Column, s_ReaderButtonRocket, s_ClearButtonRocket, "Клавиша вкл/выкл ракеты", "toggle tc_anti_void_rocket 0 1");
+	}
+
+	MyForkEndColumn(&s_ScrollRegion, Column);
+}
+
+void CMenus::RenderSettingsMyForkWeaponSpin(CUIRect MainView)
+{
+	CUIRect Column, Label, Button;
+	static CScrollRegion s_ScrollRegion;
+	MyForkBeginColumn(&s_ScrollRegion, MainView, &Column);
+
+	auto Section = [&](const char *pTitle, const char *pDesc) {
+		Column.HSplitTop(Margin, nullptr, &Column);
+		Column.HSplitTop(HeadlineHeight, &Label, &Column);
+		Ui()->DoLabel(&Label, pTitle, HeadlineFontSize, TEXTALIGN_ML);
+		Column.HSplitTop(MarginSmall, nullptr, &Column);
+		if(pDesc && pDesc[0])
+		{
+			Column.HSplitTop(LineSize * 0.85f, &Label, &Column);
+			TextRender()->TextColor(0.55f, 0.6f, 0.65f, 1.0f);
+			Ui()->DoLabel(&Label, pDesc, FontSize * 0.8f, TEXTALIGN_ML);
+			TextRender()->TextColor(TextRender()->DefaultTextColor());
+			Column.HSplitTop(MarginExtraSmall, nullptr, &Column);
+		}
+	};
+
+	Section("Крутилка оружия", "Косметика. Не влияет на ваш реальный прицел, крюк и стрельбу.");
+	DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcWeaponSpin, "Включить крутилку оружия", &g_Config.m_TcWeaponSpin, &Column, LineSize);
+	if(g_Config.m_TcWeaponSpin)
+	{
+		// ***** Mode picker (one button per mode) ***** //
+		Section("Режим", "Как именно ведёт себя оружие.");
+		static const char *const s_apModeNames[CControls::NUM_WEAPON_SPIN_MODES] = {
+			"Вращение по часовой",
+			"Вращение против часовой",
+			"Маятник (качание у прицела)",
+			"Случайные рывки (в разные стороны)",
+			"Дрожание (мелкая тряска)",
+			"По 8 направлениям",
+			"Случайный дрейф (плавно)",
+			"Хаос (рывки + вращение)"};
+		static CButtonContainer s_aModeButtons[CControls::NUM_WEAPON_SPIN_MODES];
+		for(int i = 0; i < CControls::NUM_WEAPON_SPIN_MODES; ++i)
+		{
+			Column.HSplitTop(MarginExtraSmall, nullptr, &Column);
+			Column.HSplitTop(LineSize, &Button, &Column);
+			if(DoButton_Menu(&s_aModeButtons[i], s_apModeNames[i], g_Config.m_TcWeaponSpinMode == i, &Button))
+				g_Config.m_TcWeaponSpinMode = i;
+		}
+
+		// ***** Parameters ***** //
+		Section("Параметры", "Скорость управляет скоростью вращения, для рывков — их частотой.");
+		Column.HSplitTop(LineSize, &Button, &Column);
+		Ui()->DoScrollbarOption(&g_Config.m_TcWeaponSpinSpeed, &g_Config.m_TcWeaponSpinSpeed, &Button, "Скорость / частота", 0, 500, &CUi::ms_LinearScrollbarScale, CUi::SCROLLBAR_OPTION_NOCLAMPVALUE);
+		Column.HSplitTop(LineSize, &Button, &Column);
+		Ui()->DoScrollbarOption(&g_Config.m_TcWeaponSpinRandom, &g_Config.m_TcWeaponSpinRandom, &Button, "Хаотичность (поверх режима)", 0, 100, &CUi::ms_LinearScrollbarScale, 0, "%");
+
+		// ***** Visibility ***** //
+		Section("Видимость", "Кому показывать вращение.");
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcWeaponSpinOthers, "Крутить и у других игроков (локально)", &g_Config.m_TcWeaponSpinOthers, &Column, LineSize);
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcWeaponSpinReal, "Реальный спин (видят другие игроки)", &g_Config.m_TcWeaponSpinReal, &Column, LineSize);
+		if(g_Config.m_TcWeaponSpinReal)
+		{
+			Column.HSplitTop(LineSize * 0.85f, &Label, &Column);
+			TextRender()->TextColor(0.9f, 0.78f, 0.35f, 1.0f);
+			Ui()->DoLabel(&Label, "Отправляет вращение на сервер. Прицел сохраняется на тиках хука/стрельбы.", FontSize * 0.8f, TEXTALIGN_ML);
+			TextRender()->TextColor(TextRender()->DefaultTextColor());
+		}
+
+		// ***** Binds ***** //
+		Section("Бинды", "Клавиши для быстрого управления.");
+		static CButtonContainer s_ReaderSpinToggle, s_ClearSpinToggle;
+		DoLine_KeyReader(Column, s_ReaderSpinToggle, s_ClearSpinToggle, "Вкл/выкл крутилку", "tc_weapon_spin_toggle");
+		static CButtonContainer s_ReaderSpinMode, s_ClearSpinMode;
+		DoLine_KeyReader(Column, s_ReaderSpinMode, s_ClearSpinMode, "Следующий режим", "tc_weapon_spin_mode_next");
+	}
+
+	MyForkEndColumn(&s_ScrollRegion, Column);
+}
+
+// ---------------- Proxy manager (saved proxy list + ping) ----------------
+
+static std::string ProxyKey(const char *pHost, int Port)
+{
+	char aKey[160];
+	str_format(aKey, sizeof(aKey), "%s:%d", pHost, Port);
+	return aKey;
+}
+
+void CMenus::LoadProxies()
+{
+	if(m_ProxiesLoaded)
+		return;
+	m_ProxiesLoaded = true;
+
+	IOHANDLE File = Storage()->OpenFile("tclient_proxies.cfg", IOFLAG_READ, IStorage::TYPE_ALL);
+	if(File)
+	{
+		CLineReader Reader;
+		if(Reader.OpenFile(File)) // takes ownership of File and closes it
+		{
+			const char *pLine;
+			while((pLine = Reader.Get()))
+			{
+				if(pLine[0] == '\0' || pLine[0] == '#')
+					continue;
+				// Tab separated: type, port, host, user, pass, method, name
+				const char *apFields[7] = {"", "", "", "", "", "", ""};
+				char aBuf[768];
+				str_copy(aBuf, pLine, sizeof(aBuf));
+				int Field = 0;
+				apFields[0] = aBuf;
+				for(char *p = aBuf; *p && Field < 6; ++p)
+				{
+					if(*p == '\t')
+					{
+						*p = '\0';
+						apFields[++Field] = p + 1;
+					}
+				}
+				CProxyEntry Entry;
+				Entry.m_Type = str_toint(apFields[0]) == NET_PROXY_TYPE_SHADOWSOCKS ? NET_PROXY_TYPE_SHADOWSOCKS : NET_PROXY_TYPE_SOCKS5;
+				Entry.m_Port = std::clamp(str_toint(apFields[1]), 1, 65535);
+				str_copy(Entry.m_aHost, apFields[2], sizeof(Entry.m_aHost));
+				str_copy(Entry.m_aUser, apFields[3], sizeof(Entry.m_aUser));
+				str_copy(Entry.m_aPass, apFields[4], sizeof(Entry.m_aPass));
+				str_copy(Entry.m_aMethod, apFields[5][0] ? apFields[5] : "chacha20-ietf-poly1305", sizeof(Entry.m_aMethod));
+				str_copy(Entry.m_aName, apFields[6], sizeof(Entry.m_aName));
+				if(Entry.m_aHost[0])
+					m_vProxies.push_back(Entry);
+			}
+		}
+	}
+
+	// Highlight the entry that matches the currently active proxy config.
+	for(size_t i = 0; i < m_vProxies.size(); ++i)
+	{
+		if(m_vProxies[i].m_Type == g_Config.m_TcSocks5Type && m_vProxies[i].m_Port == g_Config.m_TcSocks5Port && str_comp(m_vProxies[i].m_aHost, g_Config.m_TcSocks5Host) == 0)
+		{
+			m_SelectedProxy = i;
+			break;
+		}
+	}
+	StartProxyPing();
+}
+
+void CMenus::SaveProxies()
+{
+	IOHANDLE File = Storage()->OpenFile("tclient_proxies.cfg", IOFLAG_WRITE, IStorage::TYPE_SAVE);
+	if(!File)
+		return;
+	for(const CProxyEntry &Entry : m_vProxies)
+	{
+		// Sanitize: tabs/newlines would corrupt the line format.
+		const auto Clean = [](const char *pIn, char *pOut, size_t Size) {
+			str_copy(pOut, pIn, Size);
+			for(char *p = pOut; *p; ++p)
+				if(*p == '\t' || *p == '\n' || *p == '\r')
+					*p = ' ';
+		};
+		char aHost[128], aUser[64], aPass[64], aMethod[32], aName[64];
+		Clean(Entry.m_aHost, aHost, sizeof(aHost));
+		Clean(Entry.m_aUser, aUser, sizeof(aUser));
+		Clean(Entry.m_aPass, aPass, sizeof(aPass));
+		Clean(Entry.m_aMethod, aMethod, sizeof(aMethod));
+		Clean(Entry.m_aName, aName, sizeof(aName));
+		char aLine[768];
+		str_format(aLine, sizeof(aLine), "%d\t%d\t%s\t%s\t%s\t%s\t%s\n", Entry.m_Type, Entry.m_Port, aHost, aUser, aPass, aMethod, aName);
+		io_write(File, aLine, str_length(aLine));
+	}
+	io_close(File);
+}
+
+void CMenus::ActivateProxy(int Index)
+{
+	if(Index < 0 || Index >= (int)m_vProxies.size())
+		return;
+	const CProxyEntry &Entry = m_vProxies[Index];
+	m_SelectedProxy = Index;
+	g_Config.m_TcSocks5Type = Entry.m_Type;
+	str_copy(g_Config.m_TcSocks5Host, Entry.m_aHost, sizeof(g_Config.m_TcSocks5Host));
+	g_Config.m_TcSocks5Port = Entry.m_Port;
+	str_copy(g_Config.m_TcSocks5User, Entry.m_aUser, sizeof(g_Config.m_TcSocks5User));
+	str_copy(g_Config.m_TcSocks5Pass, Entry.m_aPass, sizeof(g_Config.m_TcSocks5Pass));
+	str_copy(g_Config.m_TcSocks5Method, Entry.m_aMethod, sizeof(g_Config.m_TcSocks5Method));
+	g_Config.m_TcSocks5 = 1;
+	Console()->ExecuteLine("net_reset", IConsole::CLIENT_ID_UNSPECIFIED);
+}
+
+void CMenus::StartProxyPing()
+{
+	if(m_ProxyPingRunning.exchange(true))
+		return; // a ping sweep is already in progress
+
+	std::vector<std::pair<std::string, int>> vTargets;
+	for(const CProxyEntry &Entry : m_vProxies)
+		vTargets.emplace_back(Entry.m_aHost, Entry.m_Port);
+	{
+		std::lock_guard<std::mutex> Lock(m_ProxyPingLock);
+		for(const auto &Target : vTargets)
+			m_ProxyPings[ProxyKey(Target.first.c_str(), Target.second)] = -2; // measuring
+	}
+
+	std::thread([this, vTargets]() {
+		for(const auto &Target : vTargets)
+		{
+			int Ping = -1;
+			NETADDR Addr;
+			if(Target.first[0] != '\0' && net_host_lookup(Target.first.c_str(), &Addr, NETTYPE_IPV4 | NETTYPE_IPV6) == 0)
+			{
+				Addr.port = Target.second;
+				Ping = net_tcp_ping(&Addr, 2000);
+			}
+			std::lock_guard<std::mutex> Lock(m_ProxyPingLock);
+			m_ProxyPings[ProxyKey(Target.first.c_str(), Target.second)] = Ping;
+		}
+		m_ProxyPingRunning = false;
+	}).detach();
+}
+
+// The add/edit form for a single proxy entry.
+void CMenus::RenderProxyForm(CUIRect View, CProxyEntry *pEntry)
+{
+	const float RowH = 24.0f;
+	const bool IsShadowsocks = pEntry->m_Type == NET_PROXY_TYPE_SHADOWSOCKS;
+	CUIRect Row, Label, Field;
+
+	auto Field_ = [&](CLineInput *pInput, const char *pLabel, const char *pDefault, char *pBuf, size_t BufSize, bool Hidden) {
+		View.HSplitTop(RowH, &Row, &View);
+		View.HSplitTop(MarginSmall, nullptr, &View);
+		Row.VSplitLeft(120.0f, &Label, &Field);
+		Field.VSplitLeft(MarginSmall, nullptr, &Field);
+		Ui()->DoLabel(&Label, pLabel, FontSize, TEXTALIGN_ML);
+		pInput->SetBuffer(pBuf, BufSize);
+		pInput->SetEmptyText(pDefault);
+		pInput->SetHidden(Hidden);
+		Field.Draw(ColorRGBA(0.0f, 0.0f, 0.0f, 0.25f), IGraphics::CORNER_ALL, 3.0f);
+		Field.VMargin(MarginSmall, &Field);
+		Ui()->DoEditBox(pInput, &Field, EditBoxFontSize);
+	};
+
+	View.HSplitTop(RowH, &Label, &View);
+	Ui()->DoLabel(&Label, m_ProxyEditing == -2 ? "Новый прокси" : "Редактирование прокси", FontSize + 4.0f, TEXTALIGN_ML);
+	View.HSplitTop(MarginSmall, nullptr, &View);
+
+	// Protocol selector.
+	View.HSplitTop(RowH, &Row, &View);
+	View.HSplitTop(MarginSmall, nullptr, &View);
+	CUIRect TypeSocks, TypeSs;
+	Row.VSplitMid(&TypeSocks, &TypeSs, MarginSmall);
+	static CButtonContainer s_TypeSocks, s_TypeSs;
+	if(DoButton_Menu(&s_TypeSocks, "SOCKS5", pEntry->m_Type == NET_PROXY_TYPE_SOCKS5, &TypeSocks))
+		pEntry->m_Type = NET_PROXY_TYPE_SOCKS5;
+	if(DoButton_Menu(&s_TypeSs, "Shadowsocks", pEntry->m_Type == NET_PROXY_TYPE_SHADOWSOCKS, &TypeSs))
+		pEntry->m_Type = NET_PROXY_TYPE_SHADOWSOCKS;
+
+	static CLineInput s_NameInput;
+	Field_(&s_NameInput, "Название", "необязательно", pEntry->m_aName, sizeof(pEntry->m_aName), false);
+	static CLineInput s_HostInput;
+	Field_(&s_HostInput, "Хост / IP", "127.0.0.1", pEntry->m_aHost, sizeof(pEntry->m_aHost), false);
+
+	static CLineInput s_PortInput;
+	static char s_aPort[8] = "";
+	if(!s_PortInput.IsActive())
+		str_format(s_aPort, sizeof(s_aPort), "%d", pEntry->m_Port);
+	Field_(&s_PortInput, "Порт", "1080", s_aPort, sizeof(s_aPort), false);
+	{
+		const int Port = str_toint(s_aPort);
+		if(Port >= 1 && Port <= 65535)
+			pEntry->m_Port = Port;
+	}
+
+	if(!IsShadowsocks)
+	{
+		static CLineInput s_UserInput;
+		Field_(&s_UserInput, "Логин", "необязательно", pEntry->m_aUser, sizeof(pEntry->m_aUser), false);
+	}
+	static CLineInput s_PassInput;
+	Field_(&s_PassInput, "Пароль", IsShadowsocks ? "пароль SS" : "необязательно", pEntry->m_aPass, sizeof(pEntry->m_aPass), true);
+
+	if(IsShadowsocks)
+	{
+		View.HSplitTop(RowH * 0.8f, &Label, &View);
+		Ui()->DoLabel(&Label, "Шифр:", FontSize, TEXTALIGN_ML);
+		static const char *const s_apMethods[] = {"chacha20-ietf-poly1305", "aes-256-gcm", "aes-128-gcm"};
+		static CButtonContainer s_aMethodButtons[3];
+		for(int i = 0; i < 3; ++i)
+		{
+			View.HSplitTop(MarginExtraSmall, nullptr, &View);
+			View.HSplitTop(RowH, &Row, &View);
+			if(DoButton_Menu(&s_aMethodButtons[i], s_apMethods[i], str_comp(pEntry->m_aMethod, s_apMethods[i]) == 0, &Row))
+				str_copy(pEntry->m_aMethod, s_apMethods[i], sizeof(pEntry->m_aMethod));
+		}
+	}
+
+	// Save / Cancel.
+	View.HSplitTop(Margin, nullptr, &View);
+	View.HSplitTop(RowH + 4.0f, &Row, &View);
+	CUIRect SaveBtn, CancelBtn;
+	Row.VSplitMid(&CancelBtn, &SaveBtn, Margin);
+	static CButtonContainer s_CancelButton, s_SaveButton;
+	if(DoButton_Menu(&s_CancelButton, "Отмена", 0, &CancelBtn))
+		m_ProxyEditing = -1;
+	if(DoButton_Menu(&s_SaveButton, "Сохранить", 0, &SaveBtn) && pEntry->m_aHost[0])
+	{
+		int SavedIndex;
+		if(m_ProxyEditing == -2)
+		{
+			m_vProxies.push_back(*pEntry);
+			SavedIndex = (int)m_vProxies.size() - 1;
+		}
+		else
+		{
+			m_vProxies[m_ProxyEditing] = *pEntry;
+			SavedIndex = m_ProxyEditing;
+		}
+		SaveProxies();
+		m_ProxyEditing = -1;
+		// If we edited the active proxy, re-apply it.
+		if(SavedIndex == m_SelectedProxy)
+			ActivateProxy(SavedIndex);
+		StartProxyPing();
+	}
+}
+
+// The proxy manager: a list of saved proxies with select / edit / delete / add and ping.
+void CMenus::RenderProxyManager(CUIRect View)
+{
+	LoadProxies();
+
+	if(m_ProxyEditing != -1)
+	{
+		RenderProxyForm(View, &m_EditProxy);
+		return;
+	}
+
+	const float RowH = 24.0f;
+	CUIRect Row;
+
+	// ***** Action bar ***** //
+	View.HSplitTop(RowH + 2.0f, &Row, &View);
+	const float BarW = Row.w;
+	CUIRect EnableBtn, ApplyBtn, PingBtn, AddBtn;
+	Row.VSplitLeft(BarW * 0.30f, &EnableBtn, &Row);
+	Row.VSplitLeft(MarginSmall, nullptr, &Row);
+	Row.VSplitLeft(BarW * 0.22f, &ApplyBtn, &Row);
+	Row.VSplitLeft(MarginSmall, nullptr, &Row);
+	Row.VSplitLeft(BarW * 0.20f, &PingBtn, &Row);
+	Row.VSplitLeft(MarginSmall, nullptr, &Row);
+	AddBtn = Row;
+
+	static CButtonContainer s_EnableButton, s_ApplyButton, s_PingButton, s_AddButton;
+	if(DoButton_Menu(&s_EnableButton, g_Config.m_TcSocks5 ? "Прокси: ВКЛ" : "Прокси: ВЫКЛ", g_Config.m_TcSocks5, &EnableBtn))
+	{
+		g_Config.m_TcSocks5 = !g_Config.m_TcSocks5;
+		Console()->ExecuteLine("net_reset", IConsole::CLIENT_ID_UNSPECIFIED);
+	}
+	if(DoButton_Menu(&s_ApplyButton, "Применить", 0, &ApplyBtn))
+		Console()->ExecuteLine("net_reset", IConsole::CLIENT_ID_UNSPECIFIED);
+	if(DoButton_Menu(&s_PingButton, "Пинг", 0, &PingBtn))
+		StartProxyPing();
+	if(DoButton_Menu(&s_AddButton, "+ Добавить", 0, &AddBtn))
+	{
+		m_EditProxy = CProxyEntry();
+		m_EditProxy.m_Type = g_Config.m_TcSocks5Type;
+		m_ProxyEditing = -2;
+		return;
+	}
+
+	// ***** Status line ***** //
+	View.HSplitTop(MarginSmall, nullptr, &View);
+	View.HSplitTop(RowH, &Row, &View);
+	const int Status = net_proxy_status();
+	const char *pStatusText;
+	ColorRGBA StatusColor;
+	if(!g_Config.m_TcSocks5)
+	{
+		pStatusText = "Статус: выключен";
+		StatusColor = ColorRGBA(0.6f, 0.6f, 0.6f, 1.0f);
+	}
+	else if(Status == NET_PROXY_ACTIVE)
+	{
+		pStatusText = "Статус: активен";
+		StatusColor = ColorRGBA(0.4f, 0.85f, 0.4f, 1.0f);
+	}
+	else
+	{
+		pStatusText = "Статус: не подключён — проверь данные и поддержку UDP у прокси";
+		StatusColor = ColorRGBA(0.9f, 0.45f, 0.4f, 1.0f);
+	}
+	TextRender()->TextColor(StatusColor);
+	Ui()->DoLabel(&Row, pStatusText, FontSize, TEXTALIGN_ML);
+	TextRender()->TextColor(TextRender()->DefaultTextColor());
+
+	View.HSplitTop(MarginSmall, nullptr, &View);
+
+	if(m_vProxies.empty())
+	{
+		View.HSplitTop(RowH, &Row, &View);
+		TextRender()->TextColor(0.6f, 0.6f, 0.6f, 1.0f);
+		Ui()->DoLabel(&Row, "Список пуст — нажми «+ Добавить», чтобы создать прокси.", FontSize, TEXTALIGN_ML);
+		TextRender()->TextColor(TextRender()->DefaultTextColor());
+		return;
+	}
+
+	// ***** Proxy rows ***** //
+	int DeleteIndex = -1;
+	static CButtonContainer s_aSelectButtons[64], s_aEditButtons[64], s_aDeleteButtons[64];
+	for(size_t i = 0; i < m_vProxies.size() && i < 64; ++i)
+	{
+		if(View.h < RowH)
+			break; // out of space
+		View.HSplitTop(RowH, &Row, &View);
+		View.HSplitTop(MarginExtraSmall, nullptr, &View);
+
+		CUIRect Select, Ping, Edit, Del;
+		Row.VSplitRight(28.0f, &Row, &Del);
+		Row.VSplitRight(MarginExtraSmall, &Row, nullptr);
+		Row.VSplitRight(44.0f, &Row, &Edit);
+		Row.VSplitRight(MarginExtraSmall, &Row, nullptr);
+		Row.VSplitRight(62.0f, &Select, &Ping);
+
+		const CProxyEntry &Entry = m_vProxies[i];
+		const char *pType = Entry.m_Type == NET_PROXY_TYPE_SHADOWSOCKS ? "SS" : "S5";
+		char aLabel[256];
+		if(Entry.m_aName[0])
+			str_format(aLabel, sizeof(aLabel), "[%s] %s  —  %s:%d", pType, Entry.m_aName, Entry.m_aHost, Entry.m_Port);
+		else
+			str_format(aLabel, sizeof(aLabel), "[%s] %s:%d", pType, Entry.m_aHost, Entry.m_Port);
+		if(DoButton_Menu(&s_aSelectButtons[i], aLabel, (int)i == m_SelectedProxy, &Select))
+			ActivateProxy(i);
+
+		// Ping value.
+		int PingMs = -3;
+		{
+			std::lock_guard<std::mutex> Lock(m_ProxyPingLock);
+			auto It = m_ProxyPings.find(ProxyKey(Entry.m_aHost, Entry.m_Port));
+			if(It != m_ProxyPings.end())
+				PingMs = It->second;
+		}
+		char aPing[16];
+		ColorRGBA PingColor;
+		if(PingMs == -2)
+		{
+			str_copy(aPing, "…");
+			PingColor = ColorRGBA(0.6f, 0.6f, 0.6f, 1.0f);
+		}
+		else if(PingMs < 0)
+		{
+			str_copy(aPing, "—");
+			PingColor = ColorRGBA(0.7f, 0.4f, 0.4f, 1.0f);
+		}
+		else
+		{
+			str_format(aPing, sizeof(aPing), "%d ms", PingMs);
+			PingColor = PingMs < 80 ? ColorRGBA(0.4f, 0.85f, 0.4f, 1.0f) : PingMs < 160 ? ColorRGBA(0.9f, 0.85f, 0.4f, 1.0f) : ColorRGBA(0.9f, 0.5f, 0.4f, 1.0f);
+		}
+		TextRender()->TextColor(PingColor);
+		Ui()->DoLabel(&Ping, aPing, FontSize * 0.9f, TEXTALIGN_MC);
+		TextRender()->TextColor(TextRender()->DefaultTextColor());
+
+		if(DoButton_Menu(&s_aEditButtons[i], "ред", 0, &Edit))
+		{
+			m_EditProxy = Entry;
+			m_ProxyEditing = (int)i;
+		}
+		if(DoButton_Menu(&s_aDeleteButtons[i], "x", 0, &Del))
+			DeleteIndex = (int)i;
+	}
+
+	if(DeleteIndex >= 0)
+	{
+		m_vProxies.erase(m_vProxies.begin() + DeleteIndex);
+		if(m_SelectedProxy == DeleteIndex)
+			m_SelectedProxy = -1;
+		else if(m_SelectedProxy > DeleteIndex)
+			m_SelectedProxy--;
+		SaveProxies();
+	}
+}
+
+void CMenus::RenderSettingsMyForkSocks5(CUIRect MainView)
+{
+	RenderProxyManager(MainView);
 }

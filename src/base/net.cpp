@@ -13,6 +13,13 @@
 #include <iterator> // std::size
 #include <string_view>
 
+#if defined(CONF_OPENSSL)
+// TClient: Shadowsocks AEAD UDP relay uses OpenSSL for key derivation and ciphers.
+#include <openssl/evp.h>
+#include <openssl/kdf.h>
+#include <openssl/rand.h>
+#endif
+
 #if defined(CONF_WEBSOCKETS)
 #include <engine/shared/websockets.h>
 #endif
@@ -108,9 +115,22 @@ struct NETSOCKET_INTERNAL
 	int web_ipv4sock;
 	int web_ipv6sock;
 
+	// Proxy (TClient): when proxy_active is set, UDP traffic on this socket is relayed
+	// through proxy_relay. For SOCKS5 (UDP ASSOCIATE) proxy_tcp holds the control
+	// connection that keeps the association alive; for Shadowsocks the datagrams are
+	// AEAD-encrypted with ss_key/ss_cipher and proxy_relay is the Shadowsocks server.
+	int proxy_active;
+	int proxy_type;
+	int proxy_tcp;
+	NETADDR proxy_relay;
+	int ss_cipher;
+	int ss_keylen;
+	unsigned char ss_key[32];
+	unsigned char proxy_scratch[PACKETSIZE]; // decrypted Shadowsocks payload handed back from recv
+
 	NETSOCKET_BUFFER buffer;
 };
-static NETSOCKET_INTERNAL invalid_socket = {NETTYPE_INVALID, -1, -1, -1, -1};
+static NETSOCKET_INTERNAL invalid_socket = {NETTYPE_INVALID, -1, -1, -1, -1, 0, 0, -1, {}, 0, 0, {}, {}, {}};
 
 const NETADDR NETADDR_ZEROED = {NETTYPE_INVALID, {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 0};
 
@@ -819,6 +839,14 @@ static void priv_net_close_all_sockets(NETSOCKET sock)
 	}
 #endif
 
+	// TClient: tear down the SOCKS5 control connection (closing it ends the UDP association).
+	if(sock->proxy_tcp >= 0)
+	{
+		priv_net_close_socket(sock->proxy_tcp);
+		sock->proxy_tcp = -1;
+	}
+	sock->proxy_active = 0;
+
 	free(sock);
 }
 
@@ -890,6 +918,797 @@ static int priv_net_create_socket(int domain, int type, const NETADDR *bindaddr)
 	}
 
 	return sock;
+}
+
+// ------------------------------------------------------------------
+// Proxy: SOCKS5 (RFC 1928, UDP ASSOCIATE) and Shadowsocks (AEAD) UDP relay (TClient)
+// ------------------------------------------------------------------
+
+enum
+{
+	SS_CIPHER_NONE = 0,
+	SS_CIPHER_CHACHA20_POLY1305,
+	SS_CIPHER_AES_256_GCM,
+	SS_CIPHER_AES_128_GCM,
+};
+
+static struct
+{
+	int type;
+	int enabled;
+	NETADDR addr;
+	char user[64];
+	char pass[64];
+	int ss_cipher;
+	int ss_keylen;
+	unsigned char ss_key[32];
+} g_Proxy; // zero-initialized
+static int g_ProxyStatus = NET_PROXY_OFF;
+static bool g_ProxyFailedThisBatch = false;
+
+static int ss_cipher_from_name(const char *pName, int *pKeyLen)
+{
+	if(str_comp_nocase(pName, "chacha20-ietf-poly1305") == 0)
+	{
+		*pKeyLen = 32;
+		return SS_CIPHER_CHACHA20_POLY1305;
+	}
+	if(str_comp_nocase(pName, "aes-256-gcm") == 0)
+	{
+		*pKeyLen = 32;
+		return SS_CIPHER_AES_256_GCM;
+	}
+	if(str_comp_nocase(pName, "aes-128-gcm") == 0)
+	{
+		*pKeyLen = 16;
+		return SS_CIPHER_AES_128_GCM;
+	}
+	*pKeyLen = 0;
+	return SS_CIPHER_NONE;
+}
+
+#if defined(CONF_OPENSSL)
+// Derives the Shadowsocks master key from the password (legacy OpenSSL EVP_BytesToKey
+// with MD5, no salt, single iteration).
+static void ss_derive_key(const char *pPass, unsigned char *pKey, int KeyLen)
+{
+	const int PassLen = str_length(pPass);
+	unsigned char aPrev[16];
+	int PrevLen = 0;
+	int Produced = 0;
+	while(Produced < KeyLen)
+	{
+		EVP_MD_CTX *pCtx = EVP_MD_CTX_new();
+		EVP_DigestInit_ex(pCtx, EVP_md5(), nullptr);
+		if(PrevLen > 0)
+			EVP_DigestUpdate(pCtx, aPrev, PrevLen);
+		EVP_DigestUpdate(pCtx, pPass, PassLen);
+		unsigned int DigestLen = 0;
+		EVP_DigestFinal_ex(pCtx, aPrev, &DigestLen);
+		EVP_MD_CTX_free(pCtx);
+		PrevLen = 16;
+		const int Copy = (KeyLen - Produced < 16) ? (KeyLen - Produced) : 16;
+		mem_copy(pKey + Produced, aPrev, Copy);
+		Produced += Copy;
+	}
+}
+
+// HKDF-SHA1 subkey derivation with the fixed Shadowsocks "ss-subkey" info string.
+static int ss_hkdf_sha1(const unsigned char *pKey, int KeyLen, const unsigned char *pSalt, int SaltLen, unsigned char *pOut, int OutLen)
+{
+	EVP_PKEY_CTX *pCtx = EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF, nullptr);
+	if(pCtx == nullptr)
+		return -1;
+	int Ok = 0;
+	do
+	{
+		if(EVP_PKEY_derive_init(pCtx) <= 0)
+			break;
+		if(EVP_PKEY_CTX_set_hkdf_md(pCtx, EVP_sha1()) <= 0)
+			break;
+		if(EVP_PKEY_CTX_set1_hkdf_salt(pCtx, pSalt, SaltLen) <= 0)
+			break;
+		if(EVP_PKEY_CTX_set1_hkdf_key(pCtx, pKey, KeyLen) <= 0)
+			break;
+		if(EVP_PKEY_CTX_add1_hkdf_info(pCtx, (const unsigned char *)"ss-subkey", 9) <= 0)
+			break;
+		size_t Len = OutLen;
+		if(EVP_PKEY_derive(pCtx, pOut, &Len) <= 0)
+			break;
+		Ok = (int)Len == OutLen;
+	} while(false);
+	EVP_PKEY_CTX_free(pCtx);
+	return Ok ? 0 : -1;
+}
+
+static const EVP_CIPHER *ss_evp_cipher(int Cipher)
+{
+	switch(Cipher)
+	{
+	case SS_CIPHER_CHACHA20_POLY1305: return EVP_chacha20_poly1305();
+	case SS_CIPHER_AES_256_GCM: return EVP_aes_256_gcm();
+	case SS_CIPHER_AES_128_GCM: return EVP_aes_128_gcm();
+	default: return nullptr;
+	}
+}
+
+// AEAD seal: writes ciphertext||tag(16) to pOut, returns total length or -1.
+static int ss_aead_seal(int Cipher, const unsigned char *pSubkey, const unsigned char *pNonce, const unsigned char *pPlain, int PlainLen, unsigned char *pOut)
+{
+	const EVP_CIPHER *pCipher = ss_evp_cipher(Cipher);
+	if(pCipher == nullptr)
+		return -1;
+	EVP_CIPHER_CTX *pCtx = EVP_CIPHER_CTX_new();
+	if(pCtx == nullptr)
+		return -1;
+	int OutLen = -1;
+	do
+	{
+		if(EVP_EncryptInit_ex(pCtx, pCipher, nullptr, nullptr, nullptr) != 1)
+			break;
+		if(EVP_CIPHER_CTX_ctrl(pCtx, EVP_CTRL_AEAD_SET_IVLEN, 12, nullptr) != 1)
+			break;
+		if(EVP_EncryptInit_ex(pCtx, nullptr, nullptr, pSubkey, pNonce) != 1)
+			break;
+		int Len = 0;
+		if(EVP_EncryptUpdate(pCtx, pOut, &Len, pPlain, PlainLen) != 1)
+			break;
+		int Total = Len;
+		if(EVP_EncryptFinal_ex(pCtx, pOut + Total, &Len) != 1)
+			break;
+		Total += Len;
+		if(EVP_CIPHER_CTX_ctrl(pCtx, EVP_CTRL_AEAD_GET_TAG, 16, pOut + Total) != 1)
+			break;
+		OutLen = Total + 16;
+	} while(false);
+	EVP_CIPHER_CTX_free(pCtx);
+	return OutLen;
+}
+
+// AEAD open: pCipherData is ciphertext||tag(16); writes plaintext to pOut, returns length or -1.
+static int ss_aead_open(int Cipher, const unsigned char *pSubkey, const unsigned char *pNonce, const unsigned char *pCipherData, int CipherLen, unsigned char *pOut)
+{
+	if(CipherLen < 16)
+		return -1;
+	const EVP_CIPHER *pCipher = ss_evp_cipher(Cipher);
+	if(pCipher == nullptr)
+		return -1;
+	const int CtLen = CipherLen - 16;
+	EVP_CIPHER_CTX *pCtx = EVP_CIPHER_CTX_new();
+	if(pCtx == nullptr)
+		return -1;
+	int OutLen = -1;
+	do
+	{
+		if(EVP_DecryptInit_ex(pCtx, pCipher, nullptr, nullptr, nullptr) != 1)
+			break;
+		if(EVP_CIPHER_CTX_ctrl(pCtx, EVP_CTRL_AEAD_SET_IVLEN, 12, nullptr) != 1)
+			break;
+		if(EVP_DecryptInit_ex(pCtx, nullptr, nullptr, pSubkey, pNonce) != 1)
+			break;
+		int Len = 0;
+		if(EVP_DecryptUpdate(pCtx, pOut, &Len, pCipherData, CtLen) != 1)
+			break;
+		int Total = Len;
+		unsigned char aTag[16];
+		mem_copy(aTag, pCipherData + CtLen, 16);
+		if(EVP_CIPHER_CTX_ctrl(pCtx, EVP_CTRL_AEAD_SET_TAG, 16, aTag) != 1)
+			break;
+		if(EVP_DecryptFinal_ex(pCtx, pOut + Total, &Len) != 1)
+			break; // authentication failed
+		OutLen = Total + Len;
+	} while(false);
+	EVP_CIPHER_CTX_free(pCtx);
+	return OutLen;
+}
+#endif
+
+void net_proxy_set(int type, int enabled, const NETADDR *proxy_addr, const char *username, const char *password, const char *method)
+{
+	g_Proxy.type = type;
+	g_Proxy.enabled = enabled && proxy_addr != nullptr && proxy_addr->type != NETTYPE_INVALID;
+	g_Proxy.addr = (proxy_addr != nullptr) ? *proxy_addr : NETADDR_ZEROED;
+	str_copy(g_Proxy.user, username != nullptr ? username : "", sizeof(g_Proxy.user));
+	str_copy(g_Proxy.pass, password != nullptr ? password : "", sizeof(g_Proxy.pass));
+	g_Proxy.ss_cipher = SS_CIPHER_NONE;
+	g_Proxy.ss_keylen = 0;
+	mem_zero(g_Proxy.ss_key, sizeof(g_Proxy.ss_key));
+
+	if(g_Proxy.enabled && type == NET_PROXY_TYPE_SHADOWSOCKS)
+	{
+		int KeyLen = 0;
+		const int Cipher = ss_cipher_from_name(method != nullptr ? method : "", &KeyLen);
+		if(Cipher == SS_CIPHER_NONE)
+		{
+			log_error("shadowsocks", "unknown cipher '%s' (use chacha20-ietf-poly1305, aes-256-gcm or aes-128-gcm)", method != nullptr ? method : "");
+		}
+		else
+		{
+#if defined(CONF_OPENSSL)
+			g_Proxy.ss_cipher = Cipher;
+			g_Proxy.ss_keylen = KeyLen;
+			ss_derive_key(g_Proxy.pass, g_Proxy.ss_key, KeyLen);
+#else
+			log_error("shadowsocks", "this build has no OpenSSL, Shadowsocks is unavailable");
+#endif
+		}
+	}
+
+	// Start a fresh batch: the next sockets created will flip the status to ACTIVE/FAILED.
+	g_ProxyFailedThisBatch = false;
+	g_ProxyStatus = g_Proxy.enabled ? NET_PROXY_FAILED : NET_PROXY_OFF;
+}
+
+int net_proxy_status()
+{
+	return g_ProxyStatus;
+}
+
+int net_tcp_ping(const NETADDR *addr, int timeout_ms)
+{
+	if(addr == nullptr || addr->type == NETTYPE_INVALID)
+		return -1;
+	const int Family = (addr->type & NETTYPE_IPV6) ? AF_INET6 : AF_INET;
+	const int Sock = socket(Family, SOCK_STREAM, 0);
+	if(Sock < 0)
+		return -1;
+
+	// Non-blocking connect so we can time it with our own timeout.
+	{
+		unsigned long Mode = 1;
+#if defined(CONF_FAMILY_WINDOWS)
+		ioctlsocket(Sock, FIONBIO, &Mode);
+#else
+		ioctl(Sock, FIONBIO, &Mode);
+#endif
+	}
+
+	const auto Start = std::chrono::steady_clock::now();
+	int ConnectRes;
+	if(Family == AF_INET6)
+	{
+		sockaddr_in6 sa;
+		netaddr_to_sockaddr_in6(addr, &sa);
+		ConnectRes = connect(Sock, (sockaddr *)&sa, sizeof(sa));
+	}
+	else
+	{
+		sockaddr_in sa;
+		netaddr_to_sockaddr_in(addr, &sa);
+		ConnectRes = connect(Sock, (sockaddr *)&sa, sizeof(sa));
+	}
+
+	int Ping = -1;
+	if(ConnectRes == 0)
+	{
+		Ping = 0;
+	}
+	else
+	{
+		fd_set WriteFds;
+		FD_ZERO(&WriteFds);
+		FD_SET(Sock, &WriteFds);
+		timeval Tv;
+		Tv.tv_sec = timeout_ms / 1000;
+		Tv.tv_usec = (timeout_ms % 1000) * 1000;
+		const int Sel = select(Sock + 1, nullptr, &WriteFds, nullptr, &Tv);
+		if(Sel > 0 && FD_ISSET(Sock, &WriteFds))
+		{
+			int Err = 0;
+			socklen_t Len = sizeof(Err);
+			if(getsockopt(Sock, SOL_SOCKET, SO_ERROR, (char *)&Err, &Len) == 0 && Err == 0)
+				Ping = 0;
+		}
+	}
+	if(Ping == 0)
+	{
+		const auto Elapsed = std::chrono::steady_clock::now() - Start;
+		Ping = (int)std::chrono::duration_cast<std::chrono::milliseconds>(Elapsed).count();
+	}
+
+	priv_net_close_socket(Sock);
+	return Ping;
+}
+
+static void priv_socks5_set_timeout(int sock, int ms)
+{
+#if defined(CONF_FAMILY_WINDOWS)
+	DWORD tv = ms;
+	setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof(tv));
+	setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char *)&tv, sizeof(tv));
+#else
+	struct timeval tv;
+	tv.tv_sec = ms / 1000;
+	tv.tv_usec = (ms % 1000) * 1000;
+	setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof(tv));
+	setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char *)&tv, sizeof(tv));
+#endif
+}
+
+static int priv_socks5_send_all(int sock, const unsigned char *buf, int n)
+{
+	int sent = 0;
+	while(sent < n)
+	{
+		int r = send(sock, (const char *)(buf + sent), n - sent, 0);
+		if(r <= 0)
+			return -1;
+		sent += r;
+	}
+	return 0;
+}
+
+static int priv_socks5_recv_all(int sock, unsigned char *buf, int n)
+{
+	int got = 0;
+	while(got < n)
+	{
+		int r = recv(sock, (char *)(buf + got), n - got, 0);
+		if(r <= 0)
+			return -1;
+		got += r;
+	}
+	return 0;
+}
+
+// Performs the SOCKS5 greeting, optional username/password authentication and the
+// UDP ASSOCIATE request on an already-connected control socket. On success the UDP
+// relay endpoint is written to *pRelay. Returns 0 on success, -1 on failure.
+static int priv_socks5_handshake(int tcp, NETADDR *pRelay)
+{
+	const bool HaveAuth = g_Proxy.user[0] != '\0';
+
+	// Greeting: VER, NMETHODS, METHODS...
+	unsigned char aGreeting[4];
+	int GreetingLen = 0;
+	aGreeting[GreetingLen++] = 0x05;
+	if(HaveAuth)
+	{
+		aGreeting[GreetingLen++] = 0x02;
+		aGreeting[GreetingLen++] = 0x00; // no authentication
+		aGreeting[GreetingLen++] = 0x02; // username/password
+	}
+	else
+	{
+		aGreeting[GreetingLen++] = 0x01;
+		aGreeting[GreetingLen++] = 0x00; // no authentication
+	}
+	if(priv_socks5_send_all(tcp, aGreeting, GreetingLen) != 0)
+	{
+		log_error("socks5", "failed to send greeting (%s)", net_error_message().c_str());
+		return -1;
+	}
+
+	unsigned char aMethod[2];
+	if(priv_socks5_recv_all(tcp, aMethod, sizeof(aMethod)) != 0)
+	{
+		log_error("socks5", "no method reply from proxy (timeout or closed)");
+		return -1;
+	}
+	if(aMethod[0] != 0x05)
+	{
+		log_error("socks5", "proxy is not SOCKS5 (got version %d)", aMethod[0]);
+		return -1;
+	}
+	if(aMethod[1] == 0xFF)
+	{
+		log_error("socks5", "proxy rejected all authentication methods (credentials required?)");
+		return -1;
+	}
+	if(aMethod[1] == 0x02)
+	{
+		// Username/password authentication (RFC 1929)
+		const int UserLen = str_length(g_Proxy.user);
+		const int PassLen = str_length(g_Proxy.pass);
+		if(UserLen > 255 || PassLen > 255)
+		{
+			log_error("socks5", "username/password too long");
+			return -1;
+		}
+		unsigned char aAuth[3 + 255 + 255];
+		int AuthLen = 0;
+		aAuth[AuthLen++] = 0x01; // subnegotiation version
+		aAuth[AuthLen++] = (unsigned char)UserLen;
+		mem_copy(aAuth + AuthLen, g_Proxy.user, UserLen);
+		AuthLen += UserLen;
+		aAuth[AuthLen++] = (unsigned char)PassLen;
+		mem_copy(aAuth + AuthLen, g_Proxy.pass, PassLen);
+		AuthLen += PassLen;
+		if(priv_socks5_send_all(tcp, aAuth, AuthLen) != 0)
+		{
+			log_error("socks5", "failed to send credentials (%s)", net_error_message().c_str());
+			return -1;
+		}
+		unsigned char aAuthReply[2];
+		if(priv_socks5_recv_all(tcp, aAuthReply, sizeof(aAuthReply)) != 0 || aAuthReply[1] != 0x00)
+		{
+			log_error("socks5", "authentication failed (wrong username/password?)");
+			return -1;
+		}
+	}
+	else if(aMethod[1] != 0x00)
+	{
+		log_error("socks5", "proxy selected unsupported authentication method %d", aMethod[1]);
+		return -1;
+	}
+
+	// UDP ASSOCIATE request. We do not know our source address yet, so send 0.0.0.0:0.
+	const unsigned char aRequest[10] = {0x05, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0};
+	if(priv_socks5_send_all(tcp, aRequest, sizeof(aRequest)) != 0)
+	{
+		log_error("socks5", "failed to send UDP ASSOCIATE request (%s)", net_error_message().c_str());
+		return -1;
+	}
+
+	unsigned char aHead[4];
+	if(priv_socks5_recv_all(tcp, aHead, sizeof(aHead)) != 0)
+	{
+		log_error("socks5", "no UDP ASSOCIATE reply from proxy");
+		return -1;
+	}
+	if(aHead[0] != 0x05 || aHead[1] != 0x00)
+	{
+		log_error("socks5", "proxy rejected UDP ASSOCIATE (reply code %d) - it likely does not support UDP", aHead[1]);
+		return -1;
+	}
+
+	*pRelay = NETADDR_ZEROED;
+	if(aHead[3] == 0x01) // IPv4
+	{
+		unsigned char aAddr[4 + 2];
+		if(priv_socks5_recv_all(tcp, aAddr, sizeof(aAddr)) != 0)
+			return -1;
+		pRelay->type = NETTYPE_IPV4;
+		mem_copy(pRelay->ip, aAddr, 4);
+		pRelay->port = (aAddr[4] << 8) | aAddr[5];
+	}
+	else if(aHead[3] == 0x04) // IPv6
+	{
+		unsigned char aAddr[16 + 2];
+		if(priv_socks5_recv_all(tcp, aAddr, sizeof(aAddr)) != 0)
+			return -1;
+		pRelay->type = NETTYPE_IPV6;
+		mem_copy(pRelay->ip, aAddr, 16);
+		pRelay->port = (aAddr[16] << 8) | aAddr[17];
+	}
+	else
+	{
+		log_error("socks5", "proxy returned an unsupported relay address type %d", aHead[3]);
+		return -1;
+	}
+
+	// Many proxies report 0.0.0.0 as relay address, meaning "use the proxy's own IP".
+	if(pRelay->type == NETTYPE_IPV4 && pRelay->ip[0] == 0 && pRelay->ip[1] == 0 && pRelay->ip[2] == 0 && pRelay->ip[3] == 0 && (g_Proxy.addr.type & NETTYPE_IPV4))
+	{
+		mem_copy(pRelay->ip, g_Proxy.addr.ip, 4);
+	}
+	return 0;
+}
+
+// Establishes the proxy relay for the given socket. On failure the socket keeps working
+// without a proxy (traffic goes direct) and the status is FAILED.
+static void priv_net_proxy_setup(NETSOCKET sock)
+{
+	sock->proxy_active = 0;
+	sock->proxy_type = g_Proxy.type;
+	sock->proxy_tcp = -1;
+
+	if(!g_Proxy.enabled)
+		return;
+	// If a previous socket in this batch already failed (e.g. proxy unreachable), skip the
+	// remaining ones immediately so we don't block for one timeout per socket.
+	if(g_ProxyFailedThisBatch)
+		return;
+
+	// Shadowsocks needs no handshake: each datagram is encrypted and sent to the SS server.
+	if(g_Proxy.type == NET_PROXY_TYPE_SHADOWSOCKS)
+	{
+#if defined(CONF_OPENSSL)
+		if(g_Proxy.ss_cipher == SS_CIPHER_NONE)
+		{
+			g_ProxyFailedThisBatch = true;
+			return;
+		}
+		sock->proxy_relay = g_Proxy.addr;
+		sock->ss_cipher = g_Proxy.ss_cipher;
+		sock->ss_keylen = g_Proxy.ss_keylen;
+		mem_copy(sock->ss_key, g_Proxy.ss_key, sizeof(sock->ss_key));
+		sock->proxy_active = 1;
+		g_ProxyStatus = NET_PROXY_ACTIVE;
+		char aRelay[NETADDR_MAXSTRSIZE];
+		net_addr_str(&sock->proxy_relay, aRelay, sizeof(aRelay), true);
+		log_info("shadowsocks", "relaying through %s", aRelay);
+#else
+		g_ProxyFailedThisBatch = true;
+#endif
+		return;
+	}
+
+	const NETADDR *pProxy = &g_Proxy.addr;
+	const int Family = (pProxy->type & NETTYPE_IPV6) ? AF_INET6 : AF_INET;
+	const int Tcp = socket(Family, SOCK_STREAM, 0);
+	if(Tcp < 0)
+	{
+		log_error("socks5", "could not create control socket (%s)", net_error_message().c_str());
+		g_ProxyFailedThisBatch = true;
+		return;
+	}
+	priv_socks5_set_timeout(Tcp, 4000);
+
+	int ConnectRes;
+	if(Family == AF_INET6)
+	{
+		sockaddr_in6 sa;
+		netaddr_to_sockaddr_in6(pProxy, &sa);
+		ConnectRes = connect(Tcp, (sockaddr *)&sa, sizeof(sa));
+	}
+	else
+	{
+		sockaddr_in sa;
+		netaddr_to_sockaddr_in(pProxy, &sa);
+		ConnectRes = connect(Tcp, (sockaddr *)&sa, sizeof(sa));
+	}
+	if(ConnectRes != 0)
+	{
+		log_error("socks5", "could not connect to proxy (%s)", net_error_message().c_str());
+		priv_net_close_socket(Tcp);
+		g_ProxyFailedThisBatch = true;
+		return;
+	}
+
+	NETADDR Relay;
+	if(priv_socks5_handshake(Tcp, &Relay) != 0)
+	{
+		priv_net_close_socket(Tcp);
+		g_ProxyFailedThisBatch = true;
+		return;
+	}
+
+	sock->proxy_tcp = Tcp;
+	sock->proxy_relay = Relay;
+	sock->proxy_active = 1;
+	g_ProxyStatus = NET_PROXY_ACTIVE;
+
+	char aRelay[NETADDR_MAXSTRSIZE];
+	net_addr_str(&Relay, aRelay, sizeof(aRelay), true);
+	log_info("socks5", "UDP ASSOCIATE established, relaying through %s", aRelay);
+}
+
+// Wraps a UDP datagram in a SOCKS5 request header and sends it to the relay.
+// Returns the number of payload bytes accepted, or -1 on error.
+static int priv_net_socks5_udp_send(NETSOCKET sock, const NETADDR *addr, const void *data, int size)
+{
+	unsigned char aBuf[4 + 16 + 2 + PACKETSIZE];
+	int Header = 0;
+	aBuf[Header++] = 0x00; // RSV
+	aBuf[Header++] = 0x00; // RSV
+	aBuf[Header++] = 0x00; // FRAG
+	if(addr->type & NETTYPE_IPV4)
+	{
+		aBuf[Header++] = 0x01;
+		mem_copy(aBuf + Header, addr->ip, 4);
+		Header += 4;
+	}
+	else // NETTYPE_IPV6
+	{
+		aBuf[Header++] = 0x04;
+		mem_copy(aBuf + Header, addr->ip, 16);
+		Header += 16;
+	}
+	aBuf[Header++] = (addr->port >> 8) & 0xff;
+	aBuf[Header++] = addr->port & 0xff;
+	if(size < 0 || Header + size > (int)sizeof(aBuf))
+		return -1;
+	mem_copy(aBuf + Header, data, size);
+
+	const NETADDR *pRelay = &sock->proxy_relay;
+	int d = -1;
+	if(pRelay->type & NETTYPE_IPV4)
+	{
+		if(sock->ipv4sock < 0)
+			return -1;
+		sockaddr_in sa;
+		netaddr_to_sockaddr_in(pRelay, &sa);
+		d = sendto(sock->ipv4sock, (const char *)aBuf, Header + size, 0, (sockaddr *)&sa, sizeof(sa));
+	}
+	else if(pRelay->type & NETTYPE_IPV6)
+	{
+		if(sock->ipv6sock < 0)
+			return -1;
+		sockaddr_in6 sa;
+		netaddr_to_sockaddr_in6(pRelay, &sa);
+		d = sendto(sock->ipv6sock, (const char *)aBuf, Header + size, 0, (sockaddr *)&sa, sizeof(sa));
+	}
+	if(d < 0)
+		return -1;
+	return size;
+}
+
+// Strips the SOCKS5 request header from a datagram received from the relay,
+// rewriting *addr to the real source and advancing *data. Returns the new payload
+// length, the unchanged length if the packet is not from the relay, or -1 to drop.
+static int priv_net_socks5_udp_unwrap(NETSOCKET sock, NETADDR *addr, unsigned char **data, int bytes)
+{
+	if(!sock->proxy_active || net_addr_comp(addr, &sock->proxy_relay) != 0)
+		return bytes;
+
+	unsigned char *p = *data;
+	if(bytes < 4 || p[2] != 0x00) // too short or fragmented
+		return -1;
+	const int Atyp = p[3];
+	int Offset = 4;
+	NETADDR Source = NETADDR_ZEROED;
+	if(Atyp == 0x01) // IPv4
+	{
+		if(bytes < Offset + 4 + 2)
+			return -1;
+		Source.type = NETTYPE_IPV4;
+		mem_copy(Source.ip, p + Offset, 4);
+		Offset += 4;
+	}
+	else if(Atyp == 0x04) // IPv6
+	{
+		if(bytes < Offset + 16 + 2)
+			return -1;
+		Source.type = NETTYPE_IPV6;
+		mem_copy(Source.ip, p + Offset, 16);
+		Offset += 16;
+	}
+	else
+	{
+		return -1; // domain source cannot be represented as a NETADDR
+	}
+	Source.port = (p[Offset] << 8) | p[Offset + 1];
+	Offset += 2;
+	*addr = Source;
+	*data = p + Offset;
+	return bytes - Offset;
+}
+
+// Encrypts a UDP datagram as a Shadowsocks AEAD packet (salt || AEAD(addr+port+payload))
+// and sends it to the Shadowsocks server. Returns the payload size, or -1 on error.
+static int priv_net_ss_udp_send(NETSOCKET sock, const NETADDR *addr, const void *data, int size)
+{
+#if defined(CONF_OPENSSL)
+	// plaintext = [ATYP][addr][port][payload]
+	unsigned char aPlain[1 + 16 + 2 + PACKETSIZE];
+	int Header = 0;
+	if(addr->type & NETTYPE_IPV4)
+	{
+		aPlain[Header++] = 0x01;
+		mem_copy(aPlain + Header, addr->ip, 4);
+		Header += 4;
+	}
+	else // NETTYPE_IPV6
+	{
+		aPlain[Header++] = 0x04;
+		mem_copy(aPlain + Header, addr->ip, 16);
+		Header += 16;
+	}
+	aPlain[Header++] = (addr->port >> 8) & 0xff;
+	aPlain[Header++] = addr->port & 0xff;
+	if(size < 0 || Header + size > (int)sizeof(aPlain))
+		return -1;
+	mem_copy(aPlain + Header, data, size);
+	const int PlainLen = Header + size;
+
+	const int KeyLen = sock->ss_keylen;
+	unsigned char aPacket[32 + sizeof(aPlain) + 16];
+	if(RAND_bytes(aPacket, KeyLen) != 1)
+		return -1;
+	unsigned char aSubkey[32];
+	if(ss_hkdf_sha1(sock->ss_key, KeyLen, aPacket, KeyLen, aSubkey, KeyLen) != 0)
+		return -1;
+	unsigned char aNonce[12];
+	mem_zero(aNonce, sizeof(aNonce));
+	const int Sealed = ss_aead_seal(sock->ss_cipher, aSubkey, aNonce, aPlain, PlainLen, aPacket + KeyLen);
+	if(Sealed < 0)
+		return -1;
+	const int PacketLen = KeyLen + Sealed;
+
+	const NETADDR *pRelay = &sock->proxy_relay;
+	int d = -1;
+	if(pRelay->type & NETTYPE_IPV4)
+	{
+		if(sock->ipv4sock < 0)
+			return -1;
+		sockaddr_in sa;
+		netaddr_to_sockaddr_in(pRelay, &sa);
+		d = sendto(sock->ipv4sock, (const char *)aPacket, PacketLen, 0, (sockaddr *)&sa, sizeof(sa));
+	}
+	else if(pRelay->type & NETTYPE_IPV6)
+	{
+		if(sock->ipv6sock < 0)
+			return -1;
+		sockaddr_in6 sa;
+		netaddr_to_sockaddr_in6(pRelay, &sa);
+		d = sendto(sock->ipv6sock, (const char *)aPacket, PacketLen, 0, (sockaddr *)&sa, sizeof(sa));
+	}
+	if(d < 0)
+		return -1;
+	return size;
+#else
+	(void)sock;
+	(void)addr;
+	(void)data;
+	(void)size;
+	return -1;
+#endif
+}
+
+// Decrypts a Shadowsocks AEAD datagram from the server into sock->proxy_scratch,
+// rewriting *addr to the real source and pointing *data into the scratch buffer.
+static int priv_net_ss_udp_unwrap(NETSOCKET sock, NETADDR *addr, unsigned char **data, int bytes)
+{
+#if defined(CONF_OPENSSL)
+	if(net_addr_comp(addr, &sock->proxy_relay) != 0)
+		return bytes; // not from the Shadowsocks server, leave untouched
+
+	const int KeyLen = sock->ss_keylen;
+	if(bytes < KeyLen + 16)
+		return -1;
+	const unsigned char *pSalt = *data;
+	unsigned char aSubkey[32];
+	if(ss_hkdf_sha1(sock->ss_key, KeyLen, pSalt, KeyLen, aSubkey, KeyLen) != 0)
+		return -1;
+	unsigned char aNonce[12];
+	mem_zero(aNonce, sizeof(aNonce));
+	const int PlainLen = ss_aead_open(sock->ss_cipher, aSubkey, aNonce, *data + KeyLen, bytes - KeyLen, sock->proxy_scratch);
+	if(PlainLen < 1)
+		return -1;
+
+	unsigned char *p = sock->proxy_scratch;
+	const int Atyp = p[0];
+	int Offset = 1;
+	NETADDR Source = NETADDR_ZEROED;
+	if(Atyp == 0x01) // IPv4
+	{
+		if(PlainLen < Offset + 4 + 2)
+			return -1;
+		Source.type = NETTYPE_IPV4;
+		mem_copy(Source.ip, p + Offset, 4);
+		Offset += 4;
+	}
+	else if(Atyp == 0x04) // IPv6
+	{
+		if(PlainLen < Offset + 16 + 2)
+			return -1;
+		Source.type = NETTYPE_IPV6;
+		mem_copy(Source.ip, p + Offset, 16);
+		Offset += 16;
+	}
+	else
+	{
+		return -1;
+	}
+	Source.port = (p[Offset] << 8) | p[Offset + 1];
+	Offset += 2;
+	*addr = Source;
+	*data = sock->proxy_scratch + Offset;
+	return PlainLen - Offset;
+#else
+	(void)sock;
+	(void)addr;
+	(void)data;
+	(void)bytes;
+	return -1;
+#endif
+}
+
+// Dispatches an outgoing datagram to the active proxy backend.
+static int priv_net_proxy_udp_send(NETSOCKET sock, const NETADDR *addr, const void *data, int size)
+{
+	if(sock->proxy_type == NET_PROXY_TYPE_SHADOWSOCKS)
+		return priv_net_ss_udp_send(sock, addr, data, size);
+	return priv_net_socks5_udp_send(sock, addr, data, size);
+}
+
+// Dispatches an incoming datagram to the active proxy backend for unwrapping.
+static int priv_net_proxy_udp_unwrap(NETSOCKET sock, NETADDR *addr, unsigned char **data, int bytes)
+{
+	if(sock->proxy_type == NET_PROXY_TYPE_SHADOWSOCKS)
+		return priv_net_ss_udp_unwrap(sock, addr, data, bytes);
+	return priv_net_socks5_udp_unwrap(sock, addr, data, bytes);
 }
 
 NETSOCKET net_udp_create(NETADDR bindaddr)
@@ -997,6 +1816,8 @@ NETSOCKET net_udp_create(NETADDR bindaddr)
 	{
 		net_set_non_blocking(sock);
 		net_buffer_init(&sock->buffer);
+		// TClient: open the SOCKS5 UDP association (no-op when no proxy is configured).
+		priv_net_proxy_setup(sock);
 	}
 
 	return sock;
@@ -1005,6 +1826,19 @@ NETSOCKET net_udp_create(NETADDR bindaddr)
 int net_udp_send(NETSOCKET sock, const NETADDR *addr, const void *data, int size)
 {
 	int d = -1;
+
+	// TClient: relay regular UDP traffic through the SOCKS5 proxy. Broadcasts (LAN
+	// discovery) and websocket traffic keep going direct.
+	if(sock->proxy_active && (addr->type & (NETTYPE_IPV4 | NETTYPE_IPV6)) && !(addr->type & NETTYPE_LINK_BROADCAST))
+	{
+		d = priv_net_proxy_udp_send(sock, addr, data, size);
+		if(d >= 0)
+		{
+			network_stats.sent_bytes += size;
+			network_stats.sent_packets++;
+		}
+		return d;
+	}
 
 	if(addr->type & NETTYPE_IPV4)
 	{
@@ -1140,6 +1974,12 @@ int net_udp_recv(NETSOCKET sock, NETADDR *addr, unsigned char **data)
 		bytes = sock->buffer.msgs[sock->buffer.pos].msg_len;
 		*data = (unsigned char *)sock->buffer.bufs[sock->buffer.pos];
 		sock->buffer.pos++;
+		if(sock->proxy_active)
+		{
+			bytes = priv_net_proxy_udp_unwrap(sock, addr, data, bytes);
+			if(bytes < 0)
+				return 0; // drop malformed relay datagram
+		}
 		update_stats(bytes);
 		return bytes;
 	}
@@ -1153,6 +1993,12 @@ int net_udp_recv(NETSOCKET sock, NETADDR *addr, unsigned char **data)
 		if(bytes > 0)
 		{
 			sockaddr_to_netaddr((sockaddr *)&recv_addr, fromlen, addr);
+			if(sock->proxy_active)
+			{
+				bytes = priv_net_proxy_udp_unwrap(sock, addr, data, bytes);
+				if(bytes < 0)
+					return 0; // drop malformed relay datagram
+			}
 			update_stats(bytes);
 			return bytes;
 		}
@@ -1167,6 +2013,12 @@ int net_udp_recv(NETSOCKET sock, NETADDR *addr, unsigned char **data)
 		if(bytes > 0)
 		{
 			sockaddr_to_netaddr((sockaddr *)&recv_addr, fromlen, addr);
+			if(sock->proxy_active)
+			{
+				bytes = priv_net_proxy_udp_unwrap(sock, addr, data, bytes);
+				if(bytes < 0)
+					return 0; // drop malformed relay datagram
+			}
 			update_stats(bytes);
 			return bytes;
 		}

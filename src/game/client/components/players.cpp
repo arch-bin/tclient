@@ -727,6 +727,18 @@ void CPlayers::RenderPlayer(
 	if(!InAir && WantOtherDir && length(Vel * 50) > 500.0f)
 		GameClient()->m_Effects.SkidTrail(Position, Vel, Player.m_Direction, Alpha, Volume);
 
+	// TClient: visual weapon spinner (cosmetic only). Override the render Angle/Direction used for the
+	// weapon and hand, then restore them before the tee is drawn so the look/eyes direction stays real.
+	// The actual aim, hook and fire direction come from the input and are never touched here.
+	const float SavedAngle = Angle;
+	const vec2 SavedDirection = Direction;
+	const bool WeaponSpinning = g_Config.m_TcWeaponSpin && (Local || g_Config.m_TcWeaponSpinOthers);
+	if(WeaponSpinning)
+	{
+		Angle = CControls::WeaponSpinAngle(Angle, Client()->LocalTime());
+		Direction = direction(Angle);
+	}
+
 	// draw gun
 	if(Player.m_Weapon >= 0)
 	{
@@ -969,6 +981,13 @@ void CPlayers::RenderPlayer(
 			case WEAPON_GRENADE: RenderHand(&RenderInfo, WeaponPosition, Direction, -pi / 2.0f, vec2(-4.0f, 7.0f), Alpha); break;
 			}
 		}
+	}
+
+	// TClient: restore the real look direction after the weapon spinner so the tee's eyes aim correctly
+	if(WeaponSpinning)
+	{
+		Angle = SavedAngle;
+		Direction = SavedDirection;
 	}
 
 	// render the "shadow" tee

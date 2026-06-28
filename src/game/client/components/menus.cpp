@@ -1315,10 +1315,20 @@ void CMenus::RenderPopupFullscreen(CUIRect Screen)
 		pTitle = Localize("Save skin");
 		pExtraText = Localize("Are you sure you want to save your skin? If a skin with this name already exists, it will be replaced.");
 	}
+	else if(m_Popup == POPUP_PROXY)
+	{
+		pTitle = "Прокси";
+	}
 
 	CUIRect Box, Part;
 	Box = Screen;
-	if(m_Popup != POPUP_FIRST_LAUNCH)
+	if(m_Popup == POPUP_PROXY)
+	{
+		// TClient: the proxy popup has many fields, give it a roomier box.
+		Box.VMargin(60.0f, &Box);
+		Box.HMargin(30.0f, &Box);
+	}
+	else if(m_Popup != POPUP_FIRST_LAUNCH)
 	{
 		Box.Margin(150.0f, &Box);
 	}
@@ -1526,6 +1536,25 @@ void CMenus::RenderPopupFullscreen(CUIRect Screen)
 		static CButtonContainer s_Button;
 		if(DoButton_Menu(&s_Button, Localize("Ok"), 0, &Button) || Ui()->ConsumeHotkey(CUi::HOTKEY_ESCAPE) || Ui()->ConsumeHotkey(CUi::HOTKEY_ENTER) || Activated)
 			m_Popup = POPUP_FIRST_LAUNCH;
+	}
+	else if(m_Popup == POPUP_PROXY)
+	{
+		CUIRect ButtonBar, CloseButton;
+		Box.HSplitBottom(20.0f, &Box, nullptr);
+		Box.HSplitBottom(24.0f, &Box, &ButtonBar);
+		Box.HSplitBottom(20.0f, &Box, nullptr);
+		Box.VMargin(40.0f, &Box);
+
+		// Same proxy manager widget used by the My Fork settings tab.
+		RenderProxyManager(Box);
+
+		ButtonBar.VMargin(120.0f, &CloseButton);
+		static CButtonContainer s_CloseButton;
+		if(DoButton_Menu(&s_CloseButton, Localize("Close"), 0, &CloseButton) || Ui()->ConsumeHotkey(CUi::HOTKEY_ESCAPE))
+		{
+			m_ProxyEditing = -1;
+			m_Popup = POPUP_NONE;
+		}
 	}
 	else if(m_Popup == POPUP_RENAME_DEMO)
 	{
@@ -2766,6 +2795,11 @@ void CMenus::SetShowStart(bool ShowStart)
 void CMenus::ShowQuitPopup()
 {
 	m_Popup = POPUP_QUIT;
+}
+
+void CMenus::ShowProxyPopup()
+{
+	m_Popup = POPUP_PROXY;
 }
 
 void CMenus::JoinTutorial()

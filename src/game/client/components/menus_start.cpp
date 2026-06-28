@@ -2,6 +2,8 @@
 /* If you are missing that file, acquire a complete release at teeworlds.com.                */
 #include "menus_start.h"
 
+#include <base/net.h>
+
 #include <engine/client/updater.h>
 #include <engine/font_icons.h>
 #include <engine/graphics.h>
@@ -38,6 +40,23 @@ void CMenusStart::RenderStartMenu(CUIRect MainView)
 
 	CUIRect Button;
 	int NewPage = -1;
+
+	// TClient: proxy quick-access button in the top-right corner (below the version line).
+	// Uses a copy of MainView so the rest of the start-menu layout is unaffected.
+	// Green = active, orange = enabled but not connected, dark = off.
+	{
+		CUIRect TopRight = MainView;
+		TopRight.HSplitTop(34.0f, nullptr, &TopRight);
+		TopRight.HSplitTop(24.0f, &TopRight, nullptr);
+		TopRight.VSplitRight(12.0f, &TopRight, nullptr);
+		TopRight.VSplitRight(120.0f, nullptr, &TopRight);
+		static CButtonContainer s_ProxyButton;
+		ColorRGBA ProxyColor = ColorRGBA(0.0f, 0.0f, 0.0f, 0.5f);
+		if(g_Config.m_TcSocks5)
+			ProxyColor = net_proxy_status() == NET_PROXY_ACTIVE ? ColorRGBA(0.0f, 1.0f, 0.0f, 0.4f) : ColorRGBA(1.0f, 0.5f, 0.0f, 0.4f);
+		if(GameClient()->m_Menus.DoButton_Menu(&s_ProxyButton, "Прокси", 0, &TopRight, BUTTONFLAG_LEFT, nullptr, IGraphics::CORNER_ALL, 5.0f, 0.0f, ProxyColor))
+			GameClient()->m_Menus.ShowProxyPopup();
+	}
 
 	CUIRect ExtMenu;
 	MainView.VSplitLeft(30.0f, nullptr, &ExtMenu);

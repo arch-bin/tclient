@@ -26,10 +26,26 @@
 #include <game/client/ui.h>
 #include <game/voting.h>
 
+#include <atomic>
 #include <chrono>
 #include <deque>
+#include <map>
+#include <mutex>
 #include <optional>
+#include <string>
 #include <vector>
+
+// TClient: a saved proxy entry (SOCKS5 or Shadowsocks) in the proxy manager.
+struct CProxyEntry
+{
+	int m_Type = 0; // NET_PROXY_TYPE_*
+	char m_aName[64] = "";
+	char m_aHost[128] = "";
+	int m_Port = 1080;
+	char m_aUser[64] = "";
+	char m_aPass[64] = "";
+	char m_aMethod[32] = "chacha20-ietf-poly1305";
+};
 
 class CMenus : public CComponent
 {
@@ -691,6 +707,7 @@ public:
 		SETTINGS_DDNET,
 		SETTINGS_ASSETS,
 		SETTINGS_TCLIENT,
+		SETTINGS_MYFORK,
 		SETTINGS_PROFILES,
 		SETTINGS_CONFIGS,
 
@@ -809,6 +826,7 @@ public:
 		POPUP_RESTART,
 		POPUP_WARNING,
 		POPUP_SAVE_SKIN,
+		POPUP_PROXY, // TClient: SOCKS5 proxy configuration on the start page
 	};
 
 	enum
@@ -823,6 +841,7 @@ public:
 	void ForceRefreshLanPage();
 	void SetShowStart(bool ShowStart);
 	void ShowQuitPopup();
+	void ShowProxyPopup();
 	void JoinTutorial();
 
 private:
@@ -851,6 +870,29 @@ private:
 	void RenderSettingsTClientWarList(CUIRect MainView);
 	void RenderSettingsTClientInfo(CUIRect MainView);
 	void RenderSettingsTClientStatusBar(CUIRect MainView);
+	// My Fork: separate top-level settings page, one tab per feature
+	void RenderSettingsMyFork(CUIRect MainView);
+	void RenderSettingsMyForkAntiVoid(CUIRect MainView);
+	void RenderSettingsMyForkWeaponSpin(CUIRect MainView);
+	void RenderSettingsMyForkHookAim(CUIRect MainView);
+	void RenderSettingsMyForkBalancer(CUIRect MainView);
+	void RenderSettingsMyForkChatSafety(CUIRect MainView);
+	void RenderSettingsMyForkSocks5(CUIRect MainView);
+	// Proxy manager (shared by My Fork "Прокси" tab and the start-page popup).
+	void RenderProxyManager(CUIRect View);
+	void RenderProxyForm(CUIRect View, CProxyEntry *pEntry);
+	void LoadProxies();
+	void SaveProxies();
+	void ActivateProxy(int Index);
+	void StartProxyPing();
+	std::vector<CProxyEntry> m_vProxies;
+	int m_SelectedProxy = -1;
+	int m_ProxyEditing = -1; // -1 list mode, -2 adding new, >=0 editing that index
+	CProxyEntry m_EditProxy;
+	bool m_ProxiesLoaded = false;
+	std::map<std::string, int> m_ProxyPings; // "host:port" -> ms (-1 unreachable, -2 measuring)
+	std::mutex m_ProxyPingLock;
+	std::atomic<bool> m_ProxyPingRunning{false};
 	void RenderSettingsTClientProfiles(CUIRect MainView);
 	void RenderSettingsTClientConfigs(CUIRect MainView);
 	void RenderTeeCute(const CAnimState *pAnim, const CTeeRenderInfo *pInfo, int Emote, vec2 Dir, vec2 Pos, bool CuteEyes, float Alpha = 1.0f);

@@ -465,6 +465,10 @@ void CCharacter::FireWeapon()
 	// by something
 	if(m_FrozenLastTick)
 		FullAuto = true;
+	// Optionally make the grenade fire once per click (1 press = 1 explosion) instead of full-auto.
+	// Applied last so it always wins, even right after unfreeze.
+	if(g_Config.m_SvGrenadeSingleShot && m_Core.m_ActiveWeapon == WEAPON_GRENADE)
+		FullAuto = false;
 
 	// don't fire hammer when player is deep and sv_deepfly is disabled
 	if(!g_Config.m_SvDeepfly && m_Core.m_ActiveWeapon == WEAPON_HAMMER && m_Core.m_DeepFrozen)

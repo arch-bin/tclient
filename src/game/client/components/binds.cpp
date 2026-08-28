@@ -266,24 +266,36 @@ void CBinds::SetDefaults()
 {
 	UnbindAll();
 
-	Bind(KEY_F1, "toggle_local_console");
-	Bind(KEY_F2, "toggle_remote_console");
-	Bind(KEY_TAB, "+scoreboard");
-	Bind(KEY_EQUALS, "+statboard");
-	Bind(KEY_F10, "screenshot");
-
+	// tclient+ ships the fork author's own layout rather than the upstream one: WASD-style movement with
+	// jump on W, hook on the left mouse button, and the fork's own toggles on the letter row.
 	Bind(KEY_A, "+left");
 	Bind(KEY_D, "+right");
-
+	Bind(KEY_W, "+jump");
 	Bind(KEY_SPACE, "+jump");
-	Bind(KEY_MOUSE_1, "+fire");
-	Bind(KEY_MOUSE_2, "+hook");
-	Bind(KEY_LSHIFT, "+emote");
-	Bind(KEY_Q, "+bindwheel");
-	Bind(KEY_RETURN, "+show_chat; chat all");
-	Bind(KEY_RIGHT, "spectate_next");
-	Bind(KEY_LEFT, "spectate_previous");
+	Bind(KEY_UP, "+jump");
+	Bind(KEY_LEFT, "+left");
+	Bind(KEY_RIGHT, "+right");
+
+	Bind(KEY_MOUSE_1, "+hook");
+	Bind(KEY_MOUSE_2, "+fire");
+	Bind(KEY_MOUSE_3, "toggle_scoreboard_cursor; +spectate");
+	Bind(KEY_MOUSE_4, "+tc_hole_assist");
+	Bind(KEY_MOUSE_WHEEL_UP, "+prevweapon");
+	Bind(KEY_MOUSE_WHEEL_DOWN, "+nextweapon");
+	Bind(KEY_LSHIFT, "+nextweapon");
+	Bind(KEY_LCTRL, "+emote");
+	Bind(KEY_LALT, "toggle_scoreboard_cursor");
 	Bind(KEY_RSHIFT, "+spectate");
+
+	// The fork's features on the keys they are actually played with.
+	Bind(KEY_C, "toggle tc_hook_aim 0 1");
+	Bind(KEY_E, "tc_weapon_spin_toggle");
+	Bind(KEY_F, "tc_anti_void_toggle");
+	Bind(KEY_G, "toggle tc_anti_void_rocket 0 1");
+	Bind(KEY_H, "toggle cl_dummy_hammer 0 1");
+	Bind(KEY_S, "+showhookcoll");
+	Bind(KEY_X, "toggle cl_dummy 0 1");
+	Bind(KEY_R, "kill");
 
 	Bind(KEY_1, "+weapon1");
 	Bind(KEY_2, "+weapon2");
@@ -291,20 +303,39 @@ void CBinds::SetDefaults()
 	Bind(KEY_4, "+weapon4");
 	Bind(KEY_5, "+weapon5");
 
-	Bind(KEY_MOUSE_WHEEL_UP, "+prevweapon");
-	Bind(KEY_MOUSE_WHEEL_DOWN, "+nextweapon");
-
 	Bind(KEY_T, "+show_chat; chat all");
 	Bind(KEY_Y, "+show_chat; chat team");
 	Bind(KEY_U, "+show_chat");
 	Bind(KEY_I, "+show_chat; chat all /c ");
+	Bind(KEY_RETURN, "+show_chat; chat all");
+	Bind(KEY_SLASH, "+show_chat; chat all /");
+	Bind(KEY_TAB, "+scoreboard");
 
+	Bind(KEY_B, "say /top5");
+	Bind(KEY_P, "say /pause");
+	Bind(KEY_PAUSE, "say /pause");
+	Bind(KEY_Q, "say /spec");
+	Bind(KEY_V, "say /info");
+
+	Bind(KEY_F1, "toggle_local_console");
+	Bind(KEY_F2, "toggle_remote_console");
 	Bind(KEY_F3, "vote yes");
 	Bind(KEY_F4, "vote no");
+	Bind(KEY_F10, "screenshot");
 
-	Bind(KEY_K, "kill");
-	Bind(KEY_Q, "say /spec");
-	Bind(KEY_P, "say /pause");
+	Bind(KEY_MINUS, "spectate_previous");
+	Bind(KEY_EQUALS, "spectate_next");
+	Bind(KEY_LEFTBRACKET, "+prevweapon");
+
+	Bind(KEY_KP_MULTIPLY, "zoom");
+	Bind(KEY_KP_MINUS, "zoom-");
+	Bind(KEY_KP_PLUS, "zoom+");
+	Bind(KEY_KP_0, "say /emote normal 999999");
+	Bind(KEY_KP_1, "say /emote happy 999999");
+	Bind(KEY_KP_2, "say /emote angry 999999");
+	Bind(KEY_KP_3, "say /emote pain 999999");
+	Bind(KEY_KP_4, "say /emote surprise 999999");
+	Bind(KEY_KP_5, "say /emote blink 999999");
 
 	g_Config.m_ClDDRaceBindsSet = 0;
 	SetDDRaceBinds(false);

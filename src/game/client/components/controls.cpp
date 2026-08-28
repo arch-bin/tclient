@@ -1686,7 +1686,7 @@ void CControls::ApplyAntiVoidRocket(bool Suppressed)
 	const bool HaveGrenade = GameClient()->m_PredictedChar.m_aWeapons[WEAPON_GRENADE].m_Got &&
 		GameClient()->m_PredictedChar.m_aWeapons[WEAPON_GRENADE].m_Ammo != 0;
 
-	const float FireDist = (float)g_Config.m_TcAntiVoidRocketDistance / 10.0f; // stored in tenths of a pixel
+	const float FireDist = (float)g_Config.m_TcAntiVoidRocketDistance / 100.0f; // stored in hundredths of a pixel, so the timing can be set right down to the edge
 	const float MoveEps = 1.0f;
 	const float Speed = length(Vel);
 	// Begin the weapon switch EARLY — before the precise fire moment — so the grenade is already in hand by

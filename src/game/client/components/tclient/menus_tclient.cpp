@@ -3338,11 +3338,12 @@ void CMenus::RenderSettingsMyForkAntiVoid(CUIRect MainView)
 			CUIRect SliderLabel, ScrollBar;
 			Button.VSplitMid(&SliderLabel, &ScrollBar, minimum(10.0f, Button.w * 0.05f));
 			char aBuf[128];
-			str_format(aBuf, sizeof(aBuf), "Fire distance (timing): %.1f px", g_Config.m_TcAntiVoidRocketDistance / 10.0f);
+			str_format(aBuf, sizeof(aBuf), "Fire distance (timing): %.2f px", g_Config.m_TcAntiVoidRocketDistance / 100.0f);
 			const float SliderFontSize = SliderLabel.h * CUi::ms_FontmodHeight * 0.8f;
 			Ui()->DoLabel(&SliderLabel, aBuf, SliderFontSize, TEXTALIGN_ML);
-			int Value = std::clamp(g_Config.m_TcAntiVoidRocketDistance, 1, 3200);
-			Value = CUi::ms_LinearScrollbarScale.ToAbsolute(Ui()->DoScrollbarH(&g_Config.m_TcAntiVoidRocketDistance, &ScrollBar, CUi::ms_LinearScrollbarScale.ToRelative(Value, 1, 3200)), 1, 3200);
+			int Value = std::clamp(g_Config.m_TcAntiVoidRocketDistance, 1, 32000);
+			// Logarithmic, otherwise the whole sub-pixel end of the range would sit in the first few pixels of the bar.
+			Value = CUi::ms_LogarithmicScrollbarScale.ToAbsolute(Ui()->DoScrollbarH(&g_Config.m_TcAntiVoidRocketDistance, &ScrollBar, CUi::ms_LogarithmicScrollbarScale.ToRelative(Value, 1, 32000)), 1, 32000);
 			g_Config.m_TcAntiVoidRocketDistance = Value;
 			Card.HSplitTop(LineSize, &Button, &Card);
 			Ui()->DoScrollbarOption(&g_Config.m_TcAntiVoidRocketCooldown, &g_Config.m_TcAntiVoidRocketCooldown, &Button, "Cooldown", 1, 100, &CUi::ms_LinearScrollbarScale, CUi::SCROLLBAR_OPTION_NOCLAMPVALUE, " ticks");

@@ -2926,7 +2926,8 @@ void CClient::Update()
 					SendInput();
 				}
 
-				if(g_Config.m_TcFastInput && GameClient()->CheckNewInput())
+				// TClient: avoid (tc_anti_void) turns fast input off, see CGameClient::FastInputEnabled
+				if(g_Config.m_TcFastInput && !g_Config.m_TcAntiVoid && GameClient()->CheckNewInput())
 				{
 					Repredict = true;
 				}

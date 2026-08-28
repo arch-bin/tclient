@@ -144,3 +144,14 @@ tags
 /build
 
 !steam_api.dll
+
+# local fork housekeeping: backups, packaged builds and saved settings never belong in the repo
+/avoid_backup_*/
+/tclient_bak_*/
+/dist-windows/
+/dist-windows.zip
+/build-windows/
+/full_client_backup_*
+/before_rollback_*
+/*.tar.gz
+/settings_tclient.cfg

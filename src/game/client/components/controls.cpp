@@ -2,6 +2,8 @@
 /* If you are missing that file, acquire a complete release at teeworlds.com.                */
 #include "controls.h"
 
+#include <game/freeze_wall.h>
+
 #include <base/log.h>
 #include <base/math.h>
 #include <base/time.h>
@@ -53,15 +55,30 @@ void CControls::ResetInput(int Dummy)
 
 	m_aInputDirectionLeft[Dummy] = 0;
 	m_aInputDirectionRight[Dummy] = 0;
+	m_aInputHook[Dummy] = 0;
 }
 
 void CControls::OnPlayerDeath()
 {
+	AvoidReportOutcome("YOU DIED");
 	for(int &AmmoCount : m_aAmmoCount)
 		AmmoCount = 0;
 	// Drop any pending rocket-save weapon restore so we don't switch weapons right after respawning.
 	for(int &PrevWeapon : m_aAntiVoidRocketPrevWeapon)
 		PrevWeapon = -1;
+	// A rescue hook that was mid-save when we died must not keep hooking after respawn: drop the
+	// latch AND release the forced m_Hook, which would otherwise stick in m_aInputData forever
+	// (only real key events rewrite it).
+	for(int d = 0; d < NUM_DUMMIES; ++d)
+	{
+		if(m_aRescueHookHeld[d])
+		{
+			m_aInputData[d].m_Hook = 0;
+			m_aRescueHookHeld[d] = false;
+		}
+		m_aRescueHookHold[d] = 0;
+		m_aAvoidHookSuppressed[d] = false; // fresh spawn: nothing is being held off anymore
+	}
 }
 
 struct CInputState
@@ -109,6 +126,28 @@ void CControls::ConKeyInputSet(IConsole::IResult *pResult, void *pUserData)
 	}
 }
 
+// TClient hole assist bind: track the raw held state, and in toggle mode flip the latch on each press edge.
+// Both are kept up to date regardless of mode, so switching tc_hole_assist_hold mid-game just works.
+void CControls::ConKeyHoleAssist(IConsole::IResult *pResult, void *pUserData)
+{
+	CControls *pControls = (CControls *)pUserData;
+	const bool Pressed = pResult->GetInteger(0) != 0;
+	const bool PressEdge = Pressed && !pControls->m_HoleAssistPressed;
+	const bool ReleaseEdge = !Pressed && pControls->m_HoleAssistPressed;
+	const bool WasActive = pControls->HoleAssistActive();
+	if(PressEdge)
+		pControls->m_HoleAssistToggled = !pControls->m_HoleAssistToggled;
+	pControls->m_HoleAssistPressed = Pressed;
+	// Fresh engage/disengage: forget any parked state so the next run re-approaches the gap cleanly.
+	if(PressEdge || ReleaseEdge)
+		for(bool &Settled : pControls->m_aHoleSettled)
+			Settled = false;
+	// Announce the on/off status in chat whenever the effective activation flips (both hold and toggle modes).
+	const bool NowActive = pControls->HoleAssistActive();
+	if(g_Config.m_TcHoleAssist && NowActive != WasActive && pControls->Client()->State() == IClient::STATE_ONLINE)
+		pControls->GameClient()->Echo(NowActive ? "Hole assist: ON" : "Hole assist: OFF");
+}
+
 void CControls::ConKeyInputNextPrevWeapon(IConsole::IResult *pResult, void *pUserData)
 {
 	CInputSet *pSet = (CInputSet *)pUserData;
@@ -132,7 +171,10 @@ void CControls::OnConsoleInit()
 		Console()->Register("+jump", "", CFGFLAG_CLIENT, ConKeyInputState, &s_State, "Jump");
 	}
 	{
-		static CInputState s_State = {this, {&m_aInputData[0].m_Hook, &m_aInputData[1].m_Hook}};
+		// TClient: the hook key writes to the shadow m_aInputHook, from which m_aInputData.m_Hook is
+		// rebuilt every tick (like +left/+right feed the direction). This keeps avoid's force-release from
+		// sticking in m_aInputData forever — see m_aInputHook.
+		static CInputState s_State = {this, {&m_aInputHook[0], &m_aInputHook[1]}};
 		Console()->Register("+hook", "", CFGFLAG_CLIENT, ConKeyInputState, &s_State, "Hook");
 	}
 	{
@@ -173,6 +215,9 @@ void CControls::OnConsoleInit()
 		static CInputSet s_Set = {this, {&m_aInputData[0].m_PrevWeapon, &m_aInputData[1].m_PrevWeapon}, 0};
 		Console()->Register("+prevweapon", "", CFGFLAG_CLIENT, ConKeyInputNextPrevWeapon, &s_Set, "Switch to previous weapon");
 	}
+
+	// TClient hole assist activation key (any bindable key; hold or toggle per tc_hole_assist_hold)
+	Console()->Register("+tc_hole_assist", "", CFGFLAG_CLIENT, ConKeyHoleAssist, this, "Activate the hole assist (hold or toggle depending on tc_hole_assist_hold)");
 }
 
 void CControls::OnMessage(int Msg, void *pRawMsg)
@@ -341,6 +386,12 @@ int CControls::SnapInput(int *pData)
 			m_aInputData[g_Config.m_ClDummy].m_Direction = -1;
 		if(!m_aInputDirectionLeft[g_Config.m_ClDummy] && m_aInputDirectionRight[g_Config.m_ClDummy])
 			m_aInputData[g_Config.m_ClDummy].m_Direction = 1;
+
+		// TClient: rebuild the hook bit from the raw held key every tick (see m_aInputHook), so a hook that
+		// avoid force-released on a previous tick comes back to the real held state before avoid re-decides.
+		// Without this the forced 0 would persist in m_aInputData with no key event to restore it, killing a
+		// held hook until you physically re-press — which is exactly why the old release could not "resume".
+		m_aInputData[g_Config.m_ClDummy].m_Hook = m_aInputHook[g_Config.m_ClDummy];
 
 		// Anti-void braking, balancer, and the rocket counter. Factored into ApplyAutoSafety so the exact same
 		// logic also runs while chat/menu is open (the frozen-input branch above) and while spectating.
@@ -542,6 +593,28 @@ void CControls::ApplyAutoSafety()
 	if(!HaveLocalChar())
 		return;
 
+	// Freeze is the outcome that actually matters on a gores map, and it is not a death, so nothing else
+	// would ever report it. Edge-triggered: only the tick you go from free to frozen.
+	const int LocalId = GameClient()->m_Snap.m_LocalClientId;
+	const bool Frozen = LocalId >= 0 && GameClient()->m_aClients[LocalId].m_Predicted.m_FreezeEnd != 0;
+	if(g_Config.m_TcAntiVoidDebug && Frozen && !m_aAvoidWasFrozen[g_Config.m_ClDummy])
+		AvoidReportOutcome("YOU GOT FROZEN");
+	m_aAvoidWasFrozen[g_Config.m_ClDummy] = Frozen;
+
+	// STAND DOWN WHILE FROZEN. The server throws your whole input away until you thaw, so every override
+	// decided here is dead weight — and the one still sitting in the input on the tick you DO thaw steers
+	// you for no reason you can see. The sim cannot notice this by itself: it runs on CCharacterCore, which
+	// has no freeze state at all, so it keeps confidently predicting a tee that physically cannot move.
+	// Drop the latches too, so nothing carries over from a decision taken while you were helpless.
+	if(Frozen)
+	{
+		m_aAvoidHookSuppressed[g_Config.m_ClDummy] = false;
+		m_aRescueHookHold[g_Config.m_ClDummy] = 0;
+		m_aRescueHookThrown[g_Config.m_ClDummy] = false;
+		m_aRescueHookHeld[g_Config.m_ClDummy] = false;
+		return;
+	}
+
 	// Anti-void: brake (counter-strafe) and release hook when our trajectory leads into a dangerous tile.
 	if(g_Config.m_TcAntiVoid)
 		ApplyAntiVoid();
@@ -560,6 +633,17 @@ void CControls::ApplyAutoSafety()
 	// fire bit stuck "held" and permanently break the counter once the balancer engaged right after a shot.
 	if(g_Config.m_TcAntiVoidRocket)
 		ApplyAntiVoidRocket(g_Config.m_TcBalancerDisableRocket && BalancerActive);
+
+	// Hole assist runs last so that, while you deliberately engage it, it wins the horizontal direction
+	// over anti-void braking (which might otherwise steer you away from the very gap you are aiming at).
+	if(g_Config.m_TcHoleAssist && HoleAssistActive())
+		ApplyHoleAssist();
+}
+
+// TClient hole assist: is it engaged right now? Hold mode follows the key; toggle mode follows the latch.
+bool CControls::HoleAssistActive() const
+{
+	return g_Config.m_TcHoleAssistHold ? m_HoleAssistPressed : m_HoleAssistToggled;
 }
 
 // TClient: is this tile index one of the types the user asked anti-void to avoid?
@@ -585,185 +669,768 @@ bool CControls::AntiVoidDangerAt(float x, float y) const
 	return AntiVoidBadTile(Collision()->GetTileIndex(Index)) || AntiVoidBadTile(Collision()->GetFrontTileIndex(Index));
 }
 
-// TClient: measure the free (non-solid) corridor around the player along one axis, in tiles.
-// Scans outward in both directions from the player's tile until it hits a solid wall (capped so
-// we never walk across the whole map). Returns the span including the tile the player stands in.
-int CControls::AntiVoidFreeSpan(bool Horizontal) const
+// TClient avoid: classify a single tile point. 0 = safe, 1 = freeze (you lose control and slide, but
+// freeze itself is NOT death — you get hooked out or unfrozen), 2 = real death with no recovery:
+// a kill tile, deep freeze, the map edge, or a teleporter. This split is the whole point: in gores
+// you dive into freeze constantly and hook back out, so treating plain freeze as death made the bot
+// fight every jump. Death is only when the frozen slide actually reaches a class-2 spot. Both game
+// and front layers are read raw (GetCollisionAt never reports freeze tiles). With tc_avoid_unfreeze
+// off, freeze is treated strictly (class 2) for players who really want to never touch it.
+int CControls::AvoidDangerClassPoint(float x, float y, bool ForceFreezeRecoverable) const
 {
-	const vec2 Pos = LocalCharPos();
-	const int Cap = 32; // tiles
-	int Span = 1; // the player's own tile
-	for(int Sign = -1; Sign <= 1; Sign += 2)
+	const int Tx = (int)(x / 32.0f);
+	const int Ty = (int)(y / 32.0f);
+	if(Tx < 0 || Ty < 0 || Tx >= Collision()->GetWidth() || Ty >= Collision()->GetHeight())
+		return 2; // running off the map kills
+	const int Index = Collision()->GetPureMapIndex(x, y);
+	if(g_Config.m_TcAntiVoidTele && (Collision()->IsTeleport(Index) || Collision()->IsEvilTeleport(Index)))
+		return 2;
+	const bool FreezeRecoverable = g_Config.m_TcAvoidUnfreeze || ForceFreezeRecoverable;
+	int Worst = 0;
+	for(const int T : {Collision()->GetTileIndex(Index), Collision()->GetFrontTileIndex(Index)})
 	{
-		for(int i = 1; i <= Cap; ++i)
-		{
-			const float x = Pos.x + (Horizontal ? Sign * i * 32.0f : 0.0f);
-			const float y = Pos.y + (Horizontal ? 0.0f : Sign * i * 32.0f);
-			if(Collision()->CheckPoint(x, y)) // solid wall
-				break;
-			Span++;
-		}
+		if((g_Config.m_TcAntiVoidDeath && T == TILE_DEATH) || (g_Config.m_TcAntiVoidDeepFreeze && T == TILE_DFREEZE))
+			return 2;
+		if((g_Config.m_TcAntiVoidFreeze && T == TILE_FREEZE) || (g_Config.m_TcAntiVoidLiveFreeze && T == TILE_LFREEZE))
+			Worst = FreezeRecoverable ? 1 : 2;
 	}
-	return Span;
+	return Worst;
 }
 
-// TClient: is the player in a tight spot? Narrow in either axis (configurable thresholds) counts.
-bool CControls::AntiVoidInNarrowSpot() const
+// TClient avoid: is this exact point a hard, no-recovery death — a kill tile or off the map edge?
+// Freeze is deliberately excluded here; it has its own, smaller corner margin below.
+bool CControls::AvoidHardDeathPoint(float x, float y) const
 {
-	if(!g_Config.m_TcAntiVoidNarrowDisable)
-		return false;
-	return AntiVoidFreeSpan(true) <= g_Config.m_TcAntiVoidNarrowWidth ||
-	       AntiVoidFreeSpan(false) <= g_Config.m_TcAntiVoidNarrowHeight;
+	const int Tx = (int)(x / 32.0f);
+	const int Ty = (int)(y / 32.0f);
+	if(Tx < 0 || Ty < 0 || Tx >= Collision()->GetWidth() || Ty >= Collision()->GetHeight())
+		return true; // off the map
+	const int Index = Collision()->GetPureMapIndex(x, y);
+	return (g_Config.m_TcAntiVoidDeath && (Collision()->GetTileIndex(Index) == TILE_DEATH || Collision()->GetFrontTileIndex(Index) == TILE_DEATH));
 }
 
+// TClient avoid: danger for the whole tee body centered at (x, y). Three shells, small to big:
+//  - centre: the true tile you stand on (freeze or death), exactly like the game.
+//  - ±6px freeze margin: a freeze tile this close means your body is a pixel from freezing — the
+//    game freezes on the centre only, but the lightweight sim can drift ~1px, so this small buffer
+//    catches the "clipped the freeze corner by a pixel" case. Kept small (6px « 16px half-tile) so a
+//    tight freeze channel you thread down the middle does NOT false-trigger.
+//  - ±14px death corners: a kill tile / off-map anywhere under your full hitbox, so a death void that
+//    only juts into the edge of your body is caught with a margin.
+int CControls::AvoidDangerClass(float x, float y, bool ForceFreezeRecoverable) const
+{
+	int Worst = AvoidDangerClassPoint(x, y, ForceFreezeRecoverable);
+	if(Worst == 2)
+		return 2;
+	// tc_avoid_freeze_margin: 0 reproduces the game exactly (freeze is decided by the centre tile alone,
+	// so grazing freeze with the edge of the hitbox is legal and the bot stays out of it); anything larger
+	// makes the bot treat freeze that close to your centre as already touched.
+	const float FreezeMargin = (float)g_Config.m_TcAvoidFreezeMargin;
+	if(FreezeMargin > 0.0f)
+	{
+		for(const float Ox : {-FreezeMargin, FreezeMargin})
+			for(const float Oy : {-FreezeMargin, FreezeMargin})
+				Worst = maximum(Worst, AvoidDangerClassPoint(x + Ox, y + Oy, ForceFreezeRecoverable));
+		if(Worst == 2)
+			return 2;
+	}
+	const float R = CCharacterCore::PhysicalSize() / 2.0f; // full half-hitbox = 14px
+	for(const float Ox : {-R, R})
+		for(const float Oy : {-R, R})
+			if(AvoidHardDeathPoint(x + Ox, y + Oy))
+				return 2;
+	return Worst; // 0 = safe, or 1 = recoverable freeze within the body
+}
+
+// TClient avoid: run the real core physics forward. For the first DelayTicks the player's own raw
+// input is held unchanged; from then on the override (BlockHook forces the hook off, ForceDir
+// overrides direction -1/0/1, 2 = keep) is applied. Delay = 0 means "act now"; Delay = margin
+// means "keep playing for a moment, then act" and is how we find the last safe moment. The core
+// itself throws, flies, grabs and drags the hook exactly like the server, so a hook still in the
+// air is covered, not just a grabbed one.
+//
+// Freeze is NOT a death: on the first freeze contact the tee loses control (input zeroed, hook
+// dropped) and just slides/falls on physics. From there only a class-2 tile (kill / deep / edge /
+// tele) is a real death; if the frozen slide reaches an unfreeze tile, comes to rest, or the
+// window runs out without dying, the tee is alive (frozen but recoverable — you hook out). That is
+// why diving into freeze off a platform no longer trips the bot. The freeze slide is followed past
+// the normal window (capped) so a long frozen fall into the void below is still caught.
+//
+// Danger is sampled along each tick's movement segment with the center-tile rule, same as the game.
+// Null world: other tees are ignored and the shared prediction state is never touched. Returns the
+// tick at which death becomes unavoidable (the moment control is lost, if frozen), or -1 if safe.
+int CControls::AvoidSimDeathTick(int DelayTicks, bool BlockHook, int ForceDir, const vec2 *pThrowHook, bool FreezeRecoverable, vec2 *pOutDeathPos, bool *pOutViaFreeze, bool *pOutHorizon) const
+{
+	// pOutDeathPos / pOutViaFreeze are only filled for the debug log: WHERE the sim ends up dying and
+	// whether it got there on its own or after losing control in freeze.
+	const CNetObj_PlayerInput RawInput = m_aInputData[g_Config.m_ClDummy];
+	CCharacterCore Core = GameClient()->m_PredictedChar;
+	Core.Init(nullptr, Collision());
+	Core.SetHookedPlayer(-1);
+
+	auto UnfreezeAt = [&](float px, float py) -> bool {
+		const int Index = Collision()->GetPureMapIndex(px, py);
+		for(const int T : {Collision()->GetTileIndex(Index), Collision()->GetFrontTileIndex(Index)})
+			if(T == TILE_UNFREEZE || T == TILE_DUNFREEZE)
+				return true;
+		return false;
+	};
+
+	if(pOutHorizon)
+		*pOutHorizon = false;
+	const int CheckTicks = g_Config.m_TcAvoidCheckTicks;
+	const int MaxFrozenSlide = g_Config.m_TcAvoidUnfreezeTicks; // follow a frozen fall this far past the window to catch the void below
+	int FrozenAt = -1; // tick we first got frozen, -1 = still in control
+	bool ThrewRescue = false; // pThrowHook phase: our throw has left the tee
+	for(int i = 0; i < (FrozenAt < 0 ? CheckTicks : CheckTicks + MaxFrozenSlide); ++i)
+	{
+		Core.m_Input = RawInput;
+		if(i >= DelayTicks)
+		{
+			if(BlockHook)
+				Core.m_Input.m_Hook = 0;
+			if(ForceDir != 2)
+				Core.m_Input.m_Direction = ForceDir;
+			if(pThrowHook)
+			{
+				// Rescue throw: release whatever hook was active first (it may be the killer), then on
+				// the first IDLE tick throw toward the target and keep holding; a miss retracts, gets
+				// released and re-thrown — the same cycle the real latch runs.
+				if(Core.m_HookState == HOOK_IDLE)
+				{
+					Core.m_Input.m_Hook = 1;
+					Core.m_Input.m_TargetX = round_to_int(pThrowHook->x * 256.0f);
+					Core.m_Input.m_TargetY = round_to_int(pThrowHook->y * 256.0f);
+					ThrewRescue = true;
+				}
+				else if(ThrewRescue && (Core.m_HookState == HOOK_FLYING || Core.m_HookState == HOOK_GRABBED))
+					Core.m_Input.m_Hook = 1;
+				else
+					Core.m_Input.m_Hook = 0;
+			}
+		}
+		if(FrozenAt >= 0)
+		{
+			// Frozen: the server ignores movement and drops the hook — a pure slide.
+			Core.m_Input.m_Direction = 0;
+			Core.m_Input.m_Hook = 0;
+			Core.m_Input.m_Jump = 0;
+		}
+		const vec2 PrevPos = Core.m_Pos;
+		Core.Tick(true);
+		Core.Move();
+		Core.Quantize(); // the real pipeline quantizes every tick; skipping it drifts the sim
+		const int Steps = maximum(1, (int)(distance(PrevPos, Core.m_Pos) / 8.0f)); // 8px steps: fine enough that a thin void corner between ticks isn't skipped at speed
+		for(int s = 1; s <= Steps; ++s)
+		{
+			const vec2 P = mix(PrevPos, Core.m_Pos, (float)s / (float)Steps);
+			const int C = AvoidDangerClass(P.x, P.y, FreezeRecoverable);
+			if(C == 2)
+			{
+				if(pOutDeathPos)
+					*pOutDeathPos = P;
+				if(pOutViaFreeze)
+					*pOutViaFreeze = FrozenAt >= 0;
+				return FrozenAt >= 0 ? FrozenAt : i;
+			}
+			if(C == 1 && FrozenAt < 0)
+				FrozenAt = i;
+			if(FrozenAt >= 0 && UnfreezeAt(P.x, P.y))
+				return -1; // the frozen slide reaches an unfreeze tile: recovered
+		}
+		if(FrozenAt >= 0 && length(Core.m_Vel) < 1.0f)
+			return -1; // frozen but come to rest without hitting death: stuck, not dead
+	}
+	// Ran out of window rather than reaching safety: the tee is still moving toward whatever is out there.
+	// Reported separately because "-1" here means "I did not look far enough", not "you are safe" — a hook
+	// released 150px under a freeze ceiling looked like a rescue for exactly this reason.
+	if(pOutHorizon)
+		*pOutHorizon = true;
+	return -1;
+}
+
+// TClient avoid: the freeze-wall save lives in game/freeze_wall.cpp so the offline harness can replay
+// recorded situations against the real map with the exact same code. Everything here is glue: build the
+// config from the cvars, run one decision, log it.
+float CControls::AvoidFreezeSideDist(float Side, float MaxDist, float Band) const
+{
+	return CFreezeWall::SideDist(Collision(), GameClient()->m_PredictedChar.m_Pos, Side, MaxDist, Band, AvoidFreezeWallCfg());
+}
+
+CFreezeWallCfg CControls::AvoidFreezeWallCfg() const
+{
+	CFreezeWallCfg Cfg;
+	Cfg.m_Mode = g_Config.m_TcAvoidDirection;
+	Cfg.m_Freeze = g_Config.m_TcAntiVoidFreeze;
+	Cfg.m_DeepFreeze = g_Config.m_TcAntiVoidDeepFreeze;
+	Cfg.m_LiveFreeze = g_Config.m_TcAntiVoidLiveFreeze;
+	Cfg.m_Death = g_Config.m_TcAntiVoidDeath;
+	Cfg.m_Tele = g_Config.m_TcAntiVoidTele;
+	return Cfg;
+}
+
+int CControls::AvoidFreezeWallSteer()
+{
+	const int Dummy = g_Config.m_ClDummy;
+	const CCharacterCore &Core = GameClient()->m_PredictedChar;
+	const bool WasLatched = m_aFreezeWallState[Dummy].m_Latch;
+	const CFreezeWallDecision D = CFreezeWall::Decide(Collision(), Core, m_aInputData[Dummy], AvoidFreezeWallCfg(), m_aFreezeWallState[Dummy]);
+
+	m_aAvoidFreezeWallLatch[Dummy] = m_aFreezeWallState[Dummy].m_Latch;
+	m_aAvoidFreezeWallHit[Dummy] = D.m_Raw != 0;
+	m_aAvoidFreezeWallPos[Dummy] = D.m_Pos;
+
+	if(g_Config.m_TcAntiVoidDebug && (D.m_Raw != 0 || D.m_Dir != 2 || WasLatched))
+	{
+		const vec2 P = Core.m_Pos;
+		char aWall[64] = "-";
+		if(D.m_Raw != 0)
+			AvoidTileDesc(D.m_Pos.x, D.m_Pos.y, aWall, sizeof(aWall));
+		log_info("avoid", "fw %s | pos %.0f,%.0f vel %.2f,%.2f key=%+d latch=%d->%d | %s in %d ticks at %.0f,%.0f [%s] dx=%+.0fpx dy=%+.0fpx | freeze-free ticks: raw=%d stop=%d counter=%d best=%d(+%dt later=%d) | clamp=%.0fpx hook=%d | applying %s",
+			D.m_pWhy, P.x, P.y, Core.m_Vel.x, Core.m_Vel.y, m_aInputData[Dummy].m_Direction, WasLatched ? 1 : 0, m_aFreezeWallState[Dummy].m_Latch ? 1 : 0,
+			D.m_Raw == 1 ? "wall" : (D.m_Raw == 2 ? "freeze (top/bottom face or death)" : "nothing"),
+			D.m_RawTick, D.m_Pos.x, D.m_Pos.y, aWall, D.m_Pos.x - P.x, D.m_Pos.y - P.y,
+			D.m_RawTick, D.m_StopScore, D.m_CounterScore, D.m_BestScore, D.m_LateTicks, D.m_LateScore, D.m_ClampDist, Core.m_HookState,
+			D.m_Dir == 2 ? "nothing" : (D.m_Dir == 0 ? "0 (key let go)" : (D.m_Dir < 0 ? "-1 (left)" : "+1 (right)")));
+	}
+	return D.m_Dir;
+}
+
+// TClient rescue hook: choose where to throw. Candidates are Segments rays spread across the FOV
+// centered on the current cursor, tried nearest-to-cursor first so the save lands as close to where
+// the player was already aiming as possible. A ray is only simulated when there is something to hit
+// within hook range (open sky can't be grabbed). The first ray whose throw-and-hold survives the
+// whole window wins. CanWait (when asked for): the winning throw would still work after sitting on
+// our hands for the margin — i.e. this is not yet the last affordable tick. Only the winner is
+// re-checked delayed; a farther ray could in theory still work later, but firing the nearest one a
+// touch early beats gambling the rescue on that.
+bool CControls::RescueHookAim(vec2 &OutDir, bool *pOutCanWait) const
+{
+	const int Dummy = g_Config.m_ClDummy;
+	const int KEEP_DIR = 2;
+	const vec2 Pos = GameClient()->m_PredictedChar.m_Pos;
+	const float AimAngle = angle(m_aMousePos[Dummy]);
+	const int Segments = g_Config.m_TcRescueHookSegments;
+	const float Step = ((float)g_Config.m_TcRescueHookFov * pi / 180.0f) / (float)Segments;
+	for(int k = 0; k < Segments; ++k)
+	{
+		const int Idx = (k + 1) / 2 * (k % 2 ? 1 : -1); // 0, +1, -1, +2, -2, ...: nearest to the cursor first
+		const vec2 Dir = direction(AimAngle + Step * (float)Idx);
+		// Range prefilter: default hook length is 380 units — a ray with nothing solid within reach
+		// can't grab anything, no point running the expensive sim on it.
+		if(!Collision()->IntersectLine(Pos, Pos + Dir * 400.0f, nullptr, nullptr))
+			continue;
+		if(AvoidSimDeathTick(0, false, KEEP_DIR, &Dir) >= 0)
+			continue;
+		OutDir = Dir;
+		if(pOutCanWait)
+			*pOutCanWait = AvoidSimDeathTick(g_Config.m_TcRescueHookMargin, false, KEEP_DIR, &Dir) < 0;
+		return true;
+	}
+	return false;
+}
+
+// TClient rescue hook: one tick of latch upkeep. Phases: before our throw, force-release whatever
+// hook was active (it may be the very thing dragging us down); on the first IDLE tick aim fresh and
+// throw; then hold the key while it flies/hangs; a miss retracts, gets released and re-thrown. If no
+// throw from the current position survives anymore, the latch gives up instead of spamming hopeless
+// hooks. The owner (ApplyAntiVoid) releases the latch the moment the player's own raw input survives
+// again, and the tick budget caps a pathological hold.
+void CControls::RescueHookUpkeep(CNetObj_PlayerInput &Input)
+{
+	const int Dummy = g_Config.m_ClDummy;
+	m_aRescueHookHold[Dummy]--;
+	if(m_aRescueHookHold[Dummy] <= 0)
+	{
+		// Budget exhausted: actively release — a forced m_Hook would otherwise stick in m_aInputData.
+		Input.m_Hook = 0;
+		m_aRescueHookHeld[Dummy] = false;
+		return;
+	}
+	const int State = GameClient()->m_PredictedChar.m_HookState;
+	if(State == HOOK_IDLE)
+	{
+		vec2 Dir;
+		if(!RescueHookAim(Dir))
+		{
+			m_aRescueHookHold[Dummy] = 0; // no saving throw from here: hand the input back
+			Input.m_Hook = 0;
+			m_aRescueHookHeld[Dummy] = false;
+			return;
+		}
+		Input.m_Hook = 1;
+		Input.m_TargetX = round_to_int(Dir.x * 256.0f);
+		Input.m_TargetY = round_to_int(Dir.y * 256.0f);
+		m_aRescueHookThrown[Dummy] = true;
+		m_aRescueHookHeld[Dummy] = true;
+		if(g_Config.m_TcAntiVoidDebug)
+			log_info("avoid", "rescue hook: throw at %.0f deg", std::atan2(Dir.y, Dir.x) * 180.0f / pi);
+		return;
+	}
+	if(m_aRescueHookThrown[Dummy] && (State == HOOK_FLYING || State == HOOK_GRABBED))
+	{
+		Input.m_Hook = 1;
+		m_aRescueHookHeld[Dummy] = true;
+		return;
+	}
+	Input.m_Hook = 0; // pre-throw with a foreign hook active, or a retracting miss: release so a (re)throw can arm
+	m_aRescueHookHeld[Dummy] = false;
+}
+
+// TClient avoid: name the tile under a world point for the debug log. Reports what the danger
+// classifier actually reacted to (both layers), not just "dangerous".
+void CControls::AvoidTileDesc(float x, float y, char *pBuf, int Size) const
+{
+	const int Tx = (int)(x / 32.0f);
+	const int Ty = (int)(y / 32.0f);
+	if(Tx < 0 || Ty < 0 || Tx >= Collision()->GetWidth() || Ty >= Collision()->GetHeight())
+	{
+		str_copy(pBuf, "off-map", Size);
+		return;
+	}
+	const int Index = Collision()->GetPureMapIndex(x, y);
+	const char *pName = "air";
+	for(const int T : {Collision()->GetTileIndex(Index), Collision()->GetFrontTileIndex(Index)})
+	{
+		if(T == TILE_DEATH)
+			pName = "kill";
+		else if(T == TILE_DFREEZE)
+			pName = "deep freeze";
+		else if(T == TILE_LFREEZE)
+			pName = "live freeze";
+		else if(T == TILE_FREEZE)
+			pName = "freeze";
+		else if(T == TILE_UNFREEZE || T == TILE_DUNFREEZE)
+			pName = "unfreeze";
+		else if(T == TILE_SOLID || T == TILE_NOHOOK)
+			pName = "solid";
+	}
+	if(Collision()->IsTeleport(Index) || Collision()->IsEvilTeleport(Index))
+		pName = "tele";
+	str_format(pBuf, Size, "%s @tile %d,%d", pName, Tx, Ty);
+}
+
+// TClient avoid: the verbose report behind tc_anti_void_debug. One decision = four lines, enough to
+// replay it afterwards without guessing: where the tee is and how it moves, what the sim thinks kills
+// it and where, what every alternative input would have done, and which gates were open or shut.
+// Costs a handful of extra simulations, so it only ever runs while the debug setting is on.
+void CControls::AvoidDebugDump(const char *pVerdict, int RawDeath, int DoDir, bool DoBlockHook) const
+{
+	const int Dummy = g_Config.m_ClDummy;
+	str_copy(const_cast<char *>(m_aAvoidLastVerdict), pVerdict, sizeof(m_aAvoidLastVerdict));
+	const_cast<int &>(m_AvoidLastVerdictTick) = Client()->PredGameTick(Dummy);
+	const int KEEP_DIR = 2;
+	const CCharacterCore &Core = GameClient()->m_PredictedChar;
+	const CNetObj_PlayerInput &Input = m_aInputData[Dummy];
+	const float HalfSize = CCharacterCore::PhysicalSize() / 2.0f;
+	const bool Grounded = Collision()->CheckPoint(Core.m_Pos.x + HalfSize, Core.m_Pos.y + HalfSize + 5.0f) ||
+			      Collision()->CheckPoint(Core.m_Pos.x - HalfSize, Core.m_Pos.y + HalfSize + 5.0f);
+	const int Counter = Core.m_Vel.x > 0.0f ? -1 : 1;
+	const char *pHookState = "?";
+	switch(Core.m_HookState)
+	{
+	case HOOK_RETRACTED: pHookState = "retracted"; break;
+	case HOOK_IDLE: pHookState = "idle"; break;
+	case HOOK_FLYING: pHookState = "flying"; break;
+	case HOOK_GRABBED: pHookState = "grabbed"; break;
+	default: pHookState = "retracting"; break;
+	}
+
+	// What the sim sees for the untouched input, and where exactly it ends.
+	vec2 DeathPos = vec2(0.0f, 0.0f);
+	bool ViaFreeze = false;
+	bool RawHorizon = false;
+	const int Death = AvoidSimDeathTick(0, false, KEEP_DIR, nullptr, false, &DeathPos, &ViaFreeze, &RawHorizon);
+	char aDeathTile[64] = "-";
+	if(Death >= 0)
+		AvoidTileDesc(DeathPos.x, DeathPos.y, aDeathTile, sizeof(aDeathTile));
+	char aHere[64];
+	AvoidTileDesc(Core.m_Pos.x, Core.m_Pos.y, aHere, sizeof(aHere));
+
+	// Every alternative the decision logic can pick, so a wrong choice is visible in the numbers. A "-1"
+	// is written as "-1h" when the tee merely outlived the window instead of reaching safety: for a tee
+	// that is not frozen EVERY survival is of that kind, so a short tc_avoid_check_ticks turns "rescued"
+	// into "not looked at", and the bot lets go of you a few ticks before the freeze it never saw.
+	char aStop[16], aCounter[16], aHookOff[16], aHookOffStop[16], aWait[16], aRaw[16];
+	auto Sim = [&](int Delay, bool Block, int Dir, char *pBuf) {
+		bool Horizon = false;
+		const int T = AvoidSimDeathTick(Delay, Block, Dir, nullptr, false, nullptr, nullptr, &Horizon);
+		str_format(pBuf, 16, "%d%s", T, (T < 0 && Horizon) ? "h" : "");
+		return T;
+	};
+	str_format(aRaw, sizeof(aRaw), "%d%s", RawDeath, (RawDeath < 0 && RawHorizon) ? "h" : "");
+	Sim(0, false, 0, aStop);
+	Sim(0, false, Counter, aCounter);
+	Sim(0, true, KEEP_DIR, aHookOff);
+	Sim(0, true, 0, aHookOffStop);
+	Sim(g_Config.m_TcAvoidKickTicks, true, KEEP_DIR, aWait);
+	const bool RealVoid = AvoidSimDeathTick(0, false, KEEP_DIR, nullptr, true) >= 0;
+
+	// Where the cursor points relative to straight up, and whether that still lets the hook come back.
+	const vec2 AimVec((float)Input.m_TargetX, (float)Input.m_TargetY);
+	const float AngleFromUp = length(AimVec) > 0.001f ? std::acos(std::clamp(-normalize(AimVec).y, -1.0f, 1.0f)) * 180.0f / pi : 0.0f;
+	const bool InCone = g_Config.m_TcAvoidResumeCone >= 360 || AngleFromUp <= (float)g_Config.m_TcAvoidResumeCone * 0.5f;
+
+	const bool HookHeld = m_aInputHook[Dummy] != 0 && Input.m_Hook != 0;
+	const bool AllowHook = g_Config.m_TcAvoidHook && HookHeld &&
+			       (Core.m_HookState == HOOK_GRABBED || Core.m_HookState == HOOK_FLYING || Core.m_HookState == HOOK_IDLE);
+
+	// Spell out what is actually being written into the input this tick. "counter-steer" alone never said
+	// which way, and a steer that only removes your key looks the same in the log as one that reverses it.
+	char aApplied[96];
+	if(DoDir == KEEP_DIR && !DoBlockHook)
+		str_copy(aApplied, "nothing (your input goes through untouched)", sizeof(aApplied));
+	else
+		str_format(aApplied, sizeof(aApplied), "dir %+d -> %s%s%s", Input.m_Direction,
+			DoDir == KEEP_DIR ? "kept" : (DoDir == 0 ? "0 (key let go)" : (DoDir < 0 ? "-1 (pushed left)" : "+1 (pushed right)")),
+			DoBlockHook ? ", hook " : "", DoBlockHook ? "1 -> 0 (released)" : "");
+	log_info("avoid", "== %s (death in %d) tick %d | applying: %s", pVerdict, RawDeath, Client()->PredGameTick(Dummy), aApplied);
+	log_info("avoid", "   self: pos %.0f,%.0f [%s] vel %.2f,%.2f speed %.1f ground=%d hook=%s(%d) keys: dir=%+d hookkey=%d jump=%d",
+		Core.m_Pos.x, Core.m_Pos.y, aHere, Core.m_Vel.x, Core.m_Vel.y, length(Core.m_Vel), Grounded ? 1 : 0,
+		pHookState, Core.m_HookState, Input.m_Direction, m_aInputHook[Dummy], Input.m_Jump);
+	// WHY that point counts as deadly: the classifier checks three shells around it (the centre tile like
+	// the game does, the tc_avoid_freeze_margin slack for freeze, and the full hitbox corners for kill
+	// tiles / the map edge). Without naming the one that fired, a death reported on a plain "air" tile
+	// looks like a bug when it is really the slack reaching into the neighbouring tile.
+	char aTrigger[128] = "unknown";
+	if(Death >= 0)
+	{
+		char aTileBuf[64];
+		bool Found = false;
+		if(AvoidDangerClassPoint(DeathPos.x, DeathPos.y) == 2)
+		{
+			str_copy(aTrigger, "centre tile (same rule as the game)", sizeof(aTrigger));
+			Found = true;
+		}
+		const float M = (float)g_Config.m_TcAvoidFreezeMargin;
+		if(!Found && M > 0.0f)
+		{
+			for(const float Ox : {-M, M})
+				for(const float Oy : {-M, M})
+					if(!Found && AvoidDangerClassPoint(DeathPos.x + Ox, DeathPos.y + Oy) == 2)
+					{
+						AvoidTileDesc(DeathPos.x + Ox, DeathPos.y + Oy, aTileBuf, sizeof(aTileBuf));
+						str_format(aTrigger, sizeof(aTrigger), "freeze slack +-%.0fpx -> %s (tc_avoid_freeze_margin)", M, aTileBuf);
+						Found = true;
+					}
+		}
+		const float R = CCharacterCore::PhysicalSize() / 2.0f;
+		if(!Found)
+		{
+			for(const float Ox : {-R, R})
+				for(const float Oy : {-R, R})
+					if(!Found && AvoidHardDeathPoint(DeathPos.x + Ox, DeathPos.y + Oy))
+					{
+						AvoidTileDesc(DeathPos.x + Ox, DeathPos.y + Oy, aTileBuf, sizeof(aTileBuf));
+						str_format(aTrigger, sizeof(aTrigger), "hitbox corner +-%.0fpx -> %s", R, aTileBuf);
+						Found = true;
+					}
+		}
+		if(!Found)
+			str_copy(aTrigger, "the frozen slide reached it", sizeof(aTrigger));
+	}
+	if(Death >= 0)
+		log_info("avoid", "   dies: in %d ticks at %.0f,%.0f [%s] %s, %.0fpx away | triggered by: %s", Death, DeathPos.x, DeathPos.y, aDeathTile,
+			ViaFreeze ? "after losing control in freeze" : "flying straight into it", distance(Core.m_Pos, DeathPos), aTrigger);
+	else
+		log_info("avoid", "   dies: %s", RawHorizon ? "not within the window — the sim simply stopped looking after tc_avoid_check_ticks, it did NOT reach safety" : "no: the tee reaches solid ground or an unfreeze tile inside the window");
+	log_info("avoid", "   what-if (-1 = survives, -1h = only outlived the %d tick window): raw=%s stop=%s counter(%+d)=%s hookoff=%s hookoff+stop=%s wait%d+hookoff=%s realvoid=%d",
+		g_Config.m_TcAvoidCheckTicks, aRaw, aStop, Counter, aCounter, aHookOff, aHookOffStop, g_Config.m_TcAvoidKickTicks, aWait, RealVoid ? 1 : 0);
+	log_info("avoid", "   gates: hook=%d(held=%d) dir=%d(air=%d freezewall=%d latched=%d key=%+d) supp=%d resume=%d rescuehold=%d nsif=%d unfreeze=%s thread=%d slack=%dpx check=%d kick=%d hookrelease=%d aim=%.0fdeg-from-up cone=%d(in=%d)",
+		AllowHook ? 1 : 0, HookHeld ? 1 : 0,
+		m_aAvoidFreezeWallLastDir[Dummy] != KEEP_DIR ? 1 : 0,
+		Grounded ? 0 : 1, m_aAvoidFreezeWallHit[Dummy] ? 1 : 0, m_aAvoidFreezeWallLatch[Dummy] ? 1 : 0, m_aAvoidFreezeWallLastDir[Dummy],
+		m_aAvoidHookSuppressed[Dummy] ? 1 : 0, g_Config.m_TcAvoidResumeHook, m_aRescueHookHold[Dummy],
+		g_Config.m_TcAvoidNsif, g_Config.m_TcAvoidUnfreeze ? "lenient" : "strict",
+		g_Config.m_TcAvoidThreadFreeze, g_Config.m_TcAvoidFreezeMargin, g_Config.m_TcAvoidCheckTicks, g_Config.m_TcAvoidKickTicks,
+		(AllowHook && (!g_Config.m_TcAvoidThreadFreeze || RealVoid)) ? 1 : 0,
+		AngleFromUp, g_Config.m_TcAvoidResumeCone, InCone ? 1 : 0);
+}
+
+// TClient avoid: report what actually HAPPENED (a death, a freeze), tied to the last decision. Without
+// this the debug log only ever showed decisions, so a run that ended in the void looked identical in the
+// log to one that went perfectly — "it released my hook at the last tick" and "I fell" were never on the
+// same page.
+void CControls::AvoidReportOutcome(const char *pWhat) const
+{
+	if(!g_Config.m_TcAntiVoidDebug)
+		return;
+	const int Dummy = g_Config.m_ClDummy;
+	const CCharacterCore &Core = GameClient()->m_PredictedChar;
+	const int Now = Client()->PredGameTick(Dummy);
+	char aHere[64];
+	AvoidTileDesc(Core.m_Pos.x, Core.m_Pos.y, aHere, sizeof(aHere));
+	if(m_AvoidLastVerdictTick >= 0)
+		log_info("avoid", "!! %s at %.0f,%.0f [%s] vel %.2f,%.2f tick %d — %d ticks after the last decision (\"%s\")",
+			pWhat, Core.m_Pos.x, Core.m_Pos.y, aHere, Core.m_Vel.x, Core.m_Vel.y, Now, Now - m_AvoidLastVerdictTick, m_aAvoidLastVerdict);
+	else
+		log_info("avoid", "!! %s at %.0f,%.0f [%s] vel %.2f,%.2f tick %d — avoid had not acted at all",
+			pWhat, Core.m_Pos.x, Core.m_Pos.y, aHere, Core.m_Vel.x, Core.m_Vel.y, Now);
+}
+
+// TClient avoid, KRX-style Blatant. No distance heuristics: the decision is "does my current input
+// eventually kill me, and if so, is THIS the last tick where reacting can still save me?".
+//  1. Simulate the raw input for the whole Check window. Survives -> pass through untouched. This
+//     is what makes it blatant and what preserves every legit move: a stable hang flush under a
+//     freeze ceiling, a normal wall swing, a brief hook tap into safe space — none of those die in
+//     the sim, so none are touched.
+//  2. It does die. If we could hold the raw input for Kick more ticks and STILL have a rescue
+//     afterwards, the last moment hasn't arrived yet: keep playing, don't touch anything.
+//  3. It's the last moment (or we're already committed). Apply the mildest override that survives
+//     when applied right now — stop steering, counter-steer, release hook, hook+direction. With
+//     NSIF, if nothing fully survives, apply whatever buys the most time.
+// Direction overrides are ordered before hook ones so a ceiling hang / hook is kept alive whenever
+// steering alone is enough. Once the hook is force-released it stays suppressed until the key is
+// physically let go, so a still-held hook can't instantly re-throw back into the same void.
 void CControls::ApplyAntiVoid()
 {
 	const int Dummy = g_Config.m_ClDummy;
-	const vec2 CharPos = LocalCharPos();
-	const vec2 Vel = GameClient()->m_PredictedChar.m_Vel;
-	const float R = 28.0f; // tee half-size
+	CNetObj_PlayerInput &Input = m_aInputData[Dummy];
+	m_aAvoidRawInput[Dummy] = Input; // snapshot before we touch anything, for the debug overlay
 
-	// Auto-disable in narrow/tight spots so we don't fight the player inside corridors.
-	// Drop any held brake from the hysteresis so movement out of the tight spot stays free.
-	if(AntiVoidInNarrowSpot())
+	// AFK protection: stop intervening once the inputs have been idle for the configured time.
+	if(g_Config.m_TcAvoidAfkProtection)
 	{
-		m_aAntiVoidHold[Dummy] = 0;
+		const float Now = Client()->LocalTime();
+		if(mem_comp(&Input, &m_aAvoidPrevInput[Dummy], sizeof(CNetObj_PlayerInput)) != 0)
+			m_aAvoidLastActivity[Dummy] = Now;
+		m_aAvoidPrevInput[Dummy] = Input;
+		if(Now - m_aAvoidLastActivity[Dummy] > (float)g_Config.m_TcAvoidAfkSeconds)
+			return;
+	}
+
+	// Hooked into another tee: the simulation can't model player physics, hands off entirely.
+	if(GameClient()->m_PredictedChar.HookedPlayer() != -1)
+		return;
+
+
+	// Falling edge of the real hook key (held last tick, let go now). The hook key feeds m_aInputHook, so
+	// this is how "the player let go / took over" is detected now that key events no longer touch
+	// m_aInputData.m_Hook directly. Computed once per tick here since ApplyAntiVoid runs exactly once.
+	const bool HookKeyReleaseEdge = m_aAvoidHookKeyPrev[Dummy] != 0 && m_aInputHook[Dummy] == 0;
+	m_aAvoidHookKeyPrev[Dummy] = m_aInputHook[Dummy];
+
+	const int KEEP_DIR = 2;
+	const int Margin = g_Config.m_TcAvoidKickTicks;
+	static bool s_aWasBlocking[NUM_DUMMIES] = {false, false};
+
+	// FREEZE-WALL STEERING — the horizontal save, decided first and completely independently of the generic
+	// death logic below. It has to fire even when that logic is perfectly happy (a wall the tee only clips
+	// with the corner of the block, or lenient freeze mode where freeze isn't a death at all), and it has to
+	// keep working while a rescue-hook latch is running, so it is applied on EVERY exit path.
+	const int FreezeWallDir = AvoidFreezeWallSteer();
+	auto ApplyFreezeWall = [&]() {
+		m_aAvoidFreezeWallLastDir[Dummy] = FreezeWallDir;
+		if(FreezeWallDir != KEEP_DIR)
+			Input.m_Direction = FreezeWallDir; // AvoidFreezeWallSteer already logged the full why
+	};
+
+	// Rescue-hook latch: a rescue throw is in progress. The m_Hook we force PERSISTS in m_aInputData
+	// between ticks (only real key events rewrite it), which has two consequences here: a physical
+	// hook-key release shows up as m_Hook back at 0 under a hold we forced — that is the player taking
+	// over, hand everything back at once; and "safe on their own" must be simulated with the hook
+	// DROPPED (BlockHook), not with our own forced hold baked into the "raw" input.
+	if(m_aRescueHookHold[Dummy] > 0)
+	{
+		if(m_aRescueHookHeld[Dummy] && HookKeyReleaseEdge)
+		{
+			m_aRescueHookHold[Dummy] = 0; // the player let go of the hook key: it is theirs again
+			m_aRescueHookHeld[Dummy] = false;
+		}
+		else
+		{
+			const bool DropSafe = AvoidSimDeathTick(0, true, KEEP_DIR) < 0;
+			const vec2 LatchPos = GameClient()->m_PredictedChar.m_Pos;
+			const float LatchHalf = CCharacterCore::PhysicalSize() / 2.0f;
+			const bool LatchGrounded = Collision()->CheckPoint(LatchPos.x + LatchHalf, LatchPos.y + LatchHalf + 5.0f) || Collision()->CheckPoint(LatchPos.x - LatchHalf, LatchPos.y + LatchHalf + 5.0f);
+			// Hold mode: while actually hanging on the rescue hook, don't let go the moment a drop
+			// would merely survive — that on/off cycle was the weak-hook balancing spam over a pit.
+			// Hang on until there is real footing under us, the player taps hook to take over, or the
+			// budget runs out. Without hold mode the first drop-safe moment hands back straight away.
+			const bool Hanging = m_aRescueHookThrown[Dummy] && GameClient()->m_PredictedChar.m_HookState == HOOK_GRABBED;
+			if(DropSafe && (!g_Config.m_TcRescueHookHoldMode || !Hanging || LatchGrounded))
+			{
+				m_aRescueHookHold[Dummy] = 0;
+				m_aRescueHookHeld[Dummy] = false;
+				Input.m_Hook = 0; // actively release: our forced hold would otherwise stick in m_aInputData
+			}
+			else
+			{
+				RescueHookUpkeep(Input);
+				if(m_aRescueHookHold[Dummy] > 0)
+				{
+					ApplyFreezeWall(); // the rescue hook owns the hook key, the freeze-wall save still owns left/right
+					s_aWasBlocking[Dummy] = true;
+					return;
+				}
+			}
+		}
+	}
+
+	// Resume-hook latch. m_aAvoidHookSuppressed remembers avoid interrupted YOUR held hook (the hook bit is
+	// rebuilt from the key each tick and can't carry that intent forward).
+	//  - You let go of the hook key (m_aInputHook == 0): the interruption is over, forget it.
+	//  - tc_avoid_resume_hook ON: resume the instant hooking is GENUINELY safe again (sim with the hook
+	//    survives the whole window). If hooking still dies, keep it forced off — NEVER resume into a death.
+	//    This is the whole point: a re-throw is only allowed back once it truly won't drill into the void.
+	//  - tc_avoid_resume_hook OFF: keep the hook forced off until you physically release the key, full stop.
+	// Resume cone: an upward throw is the one that gets you out; a sideways or downward one usually goes
+	// straight back into the pull avoid just broke. So the hook only comes back while you are actually
+	// looking up, inside tc_avoid_resume_cone degrees measured around vertical. Screen space has +y down,
+	// so straight up is (0,-1) and the angle from it is acos(-y) of the normalised aim.
+	bool AimInResumeCone = true;
+	if(g_Config.m_TcAvoidResumeCone < 360)
+	{
+		const vec2 Aim((float)Input.m_TargetX, (float)Input.m_TargetY);
+		if(length(Aim) > 0.001f)
+		{
+			const float AngleFromUp = std::acos(std::clamp(-normalize(Aim).y, -1.0f, 1.0f));
+			AimInResumeCone = AngleFromUp <= (float)g_Config.m_TcAvoidResumeCone * 0.5f * (pi / 180.0f);
+		}
+	}
+
+	bool StrictSuppress = false;
+	if(m_aAvoidHookSuppressed[Dummy])
+	{
+		if(m_aInputHook[Dummy] == 0)
+			m_aAvoidHookSuppressed[Dummy] = false; // you let go of the hook key: hand it back
+		else if(!g_Config.m_TcAvoidResumeHook)
+			StrictSuppress = true; // OFF: stay suppressed until you physically release the key
+		else if(!AimInResumeCone)
+			StrictSuppress = true; // looking sideways or down: keep it off until you aim up again
+		else if(g_Config.m_TcAvoidResumeHook >= 2)
+		{
+			// 2: hand it back only once re-hooking is genuinely survivable. This is the mode where a
+			// release is worth anything: the rescue the sim promises assumes the hook stays off, so
+			// throwing it straight back re-creates the very pull that was about to kill you.
+			if(AvoidSimDeathTick(0, false, KEEP_DIR) < 0)
+				m_aAvoidHookSuppressed[Dummy] = false;
+			else
+				StrictSuppress = true;
+		}
+		else
+		{
+			// ON: hand the hook straight back and let THIS tick's decision take it away again only if it
+			// still has to. The latch used to demand that hooking be safe for the whole check window before
+			// resuming, which is a far stricter bar than the one that took the hook away in the first place
+			// (that one only fires on the last tick where releasing still rescues you). The gap between the
+			// two bars was dead time: the hook sat disabled through ticks where throwing it was perfectly
+			// fine, and long swings never came back at all. Handing it back unconditionally makes the two
+			// bars the same one, so the hook is only ever off on the exact ticks it would kill you, and a
+			// window of safety one tick long is enough to get it back.
+			m_aAvoidHookSuppressed[Dummy] = false;
+		}
+	}
+	if(StrictSuppress)
+		Input.m_Hook = 0;
+
+	// 1. Is the raw input safe over the whole window? Then never interfere.
+	if(AvoidSimDeathTick(0, false, KEEP_DIR) < 0)
+	{
+		if(!StrictSuppress)
+			m_aAvoidHookSuppressed[Dummy] = false; // hooking is safe: nothing is being held off
+		if(g_Config.m_TcAntiVoidDebug >= 2 || (g_Config.m_TcAntiVoidDebug && s_aWasBlocking[Dummy]))
+			AvoidDebugDump(StrictSuppress ? "clear: safe now, but your hook is still held off" : "clear: raw input survives the window", -1);
+		ApplyFreezeWall();
+		s_aWasBlocking[Dummy] = false;
 		return;
 	}
 
-	// How far we look ahead grows with speed so we start braking earlier when moving fast.
-	// Distances are in pixels (32px = 1 tile), configurable separately for side vs vertical;
-	// speed can extend them further, clamped so we don't react from across the map.
-	const float LookTicks = 8.0f;
-	const float SideTriggerDist = (float)g_Config.m_TcAntiVoidSideDistance;
-	const float VertTriggerDist = (float)g_Config.m_TcAntiVoidDistance;
-	const float MaxLook = maximum(maximum(SideTriggerDist, VertTriggerDist), 32.0f * 8.0f);
+	const int RawDeath = AvoidSimDeathTick(0, false, KEEP_DIR); // tick the raw input dies (for the log)
+	const int Counter = GameClient()->m_PredictedChar.m_Vel.x > 0.0f ? -1 : 1;
 
-	// Sample either a single point at distance, or (trajectory mode) every step along the way so
-	// a thin void strip can't be "jumped over" between frames at high speed.
-	auto DangerAlong = [&](float x0, float y0, float dx, float dy) -> bool {
-		if(!g_Config.m_TcAntiVoidTrajectory)
-			return AntiVoidDangerAt(x0 + dx, y0 + dy);
-		const float Len = length(vec2(dx, dy));
-		const int Steps = maximum(1, (int)(Len / 16.0f));
-		for(int i = 1; i <= Steps; ++i)
+	// Touch the hook whenever it is GENUINELY HELD — the real key is physically down (m_aInputHook; a
+	// released tap reads 0 here and is never touched) — and the simulation says holding it kills you.
+	// This deliberately covers a FLYING or about-to-throw (IDLE) held hook too, not only a GRABBED one:
+	// a fresh throw or an instant re-throw that flies up, grabs the ceiling and drags you into the void
+	// has to be caught BEFORE it grabs — with kick=1, a GRABBED-only rule reacts a tick too late and you
+	// are already in the freeze/void (exactly the "hook drills into the upper void / re-hooks instantly
+	// and I die" reports). Genuine tap-swings are still safe: the last-tick logic only ever fires when
+	// waiting would LOSE the rescue, and a harmless swing predicts no death, so nothing is blocked.
+	const bool HookHeld = m_aInputHook[Dummy] != 0 && Input.m_Hook != 0;
+	const int PredHookState = GameClient()->m_PredictedChar.m_HookState;
+	const bool AllowHook = g_Config.m_TcAvoidHook && HookHeld &&
+		(PredHookState == HOOK_GRABBED || PredHookState == HOOK_FLYING || PredHookState == HOOK_IDLE);
+	// Grounded is still needed by the rescue hook below (a surprise throw while you stand on solid ground
+	// would be pure interference). Steering itself no longer looks at the generic death logic at all: the
+	// horizontal save is the freeze-wall one above, and nothing else may touch your movement keys.
+	const vec2 P = GameClient()->m_PredictedChar.m_Pos;
+	const float HalfSize = CCharacterCore::PhysicalSize() / 2.0f;
+	const bool Grounded = Collision()->CheckPoint(P.x + HalfSize, P.y + HalfSize + 5.0f) || Collision()->CheckPoint(P.x - HalfSize, P.y + HalfSize + 5.0f);
+
+	bool DoBlockHook = false;
+	const char *pReason = "";
+
+	// A hook is only EVER released when the sim (treating freeze as recoverable) says holding it drags you
+	// into a REAL void — a kill/deep/edge, directly or via a frozen slide (tc_avoid_thread_freeze, pure
+	// logic, no distance). If it merely pulls you through freeze you can hook out of, the hook is never
+	// touched: you can hook a side wall right next to freeze and swing off it freely, and you never get left
+	// waiting on a re-grab after a needless release. This gate covers EVERY release path below — the
+	// direction combos, NSIF, and the standalone — not only the standalone one.
+	const bool HookLeadsToRealVoid = AvoidSimDeathTick(0, false, KEEP_DIR, nullptr, true) >= 0;
+	const bool AllowHookRelease = AllowHook && (!g_Config.m_TcAvoidThreadFreeze || HookLeadsToRealVoid);
+
+	// HOOK RELEASE. The hook is the only input this part of avoid still touches: a hook that drags you into
+	// a real void is released at the last affordable tick (Kick). AllowHookRelease already carries the
+	// thread-freeze gate, so a hook that only pulls you through freeze is never ripped out here.
+	if(AllowHookRelease &&
+		AvoidSimDeathTick(0, true, KEEP_DIR) < 0 && AvoidSimDeathTick(Margin, true, KEEP_DIR) >= 0)
+	{
+		DoBlockHook = true;
+		pReason = "release hook (last tick)";
+	}
+
+	if(!DoBlockHook)
+	{
+		// Last resort, the rescue hook: nothing milder saves us. If some throw fully saves us AND this
+		// is the last affordable tick for it, engage the latch. Airborne only — on the ground you can
+		// simply stop walking, a surprise hook there would be pure interference. And it must be a
+		// GENUINE free-fall: if merely stopping or countering the held keys survives (falling from
+		// high up onto a safe floor while holding a direction key is the classic case), the danger is
+		// steerable — the direction logic or the player handles it, a hook there is pure noise.
+		if(g_Config.m_TcRescueHook && !Grounded &&
+			AvoidSimDeathTick(0, false, 0) >= 0 && AvoidSimDeathTick(0, false, Counter) >= 0)
 		{
-			const float t = (float)i / (float)Steps;
-			if(AntiVoidDangerAt(x0 + dx * t, y0 + dy * t))
-				return true;
-		}
-		return false;
-	};
-
-	// Horizontal danger toward Sign (-1 left, +1 right), sampled along the body center line only.
-	auto DangerHorizontal = [&](int Sign) {
-		const float Look = std::clamp(absolute(Vel.x) * LookTicks, SideTriggerDist, MaxLook);
-		return DangerAlong(CharPos.x, CharPos.y, Sign * Look, 0.0f);
-	};
-
-	int &Dir = m_aInputData[Dummy].m_Direction;
-	const float BrakeThreshold = 1.0f;
-	bool Blocked = false;
-
-	const bool DangerRight = DangerHorizontal(1);
-	const bool DangerLeft = DangerHorizontal(-1);
-
-	// Brake toward the dangerous side only, and never when steering away from it.
-	if(DangerRight && Dir != -1 && (Dir == 1 || Vel.x > BrakeThreshold))
-	{
-		Dir = (Vel.x > BrakeThreshold) ? -1 : 0;
-		Blocked = true;
-	}
-	else if(DangerLeft && Dir != 1 && (Dir == -1 || Vel.x < -BrakeThreshold))
-	{
-		Dir = (Vel.x < -BrakeThreshold) ? 1 : 0;
-		Blocked = true;
-	}
-
-	// Column danger check (YSign -1 = up, +1 = down)
-	auto DangerInColumn = [&](float YSign) {
-		for(float d = R; d <= VertTriggerDist + R; d += 16.0f)
-			if(AntiVoidDangerAt(CharPos.x, CharPos.y + YSign * d) || AntiVoidDangerAt(CharPos.x - R * 0.6f, CharPos.y + YSign * d) || AntiVoidDangerAt(CharPos.x + R * 0.6f, CharPos.y + YSign * d))
-				return true;
-		return false;
-	};
-
-	// Release hook ONLY when it is pulling us up into a void ceiling (padding into freeze), with safe below.
-	// This is the "vertical" half of anti-void; turn it off to keep only the sideways braking above.
-	if(g_Config.m_TcAntiVoidVertical && m_aInputData[Dummy].m_Hook)
-	{
-		const CCharacterCore &Core = GameClient()->m_PredictedChar;
-		bool HookPullingUp;
-		if(Core.m_HookState == HOOK_FLYING || Core.m_HookState == HOOK_GRABBED)
-			HookPullingUp = Core.m_HookPos.y < Core.m_Pos.y - 1.0f;
-		else
-			HookPullingUp = m_aInputData[Dummy].m_TargetY < 0;
-		if(HookPullingUp && DangerInColumn(-1.0f) && !DangerInColumn(1.0f))
-		{
-			m_aInputData[Dummy].m_Hook = 0;
-			Blocked = true;
-		}
-	}
-
-	// Optional: block jump if it would launch our head into a freeze/death ceiling (also vertical anti-void)
-	if(g_Config.m_TcAntiVoidVertical && g_Config.m_TcAntiVoidBlockJump && m_aInputData[Dummy].m_Jump && DangerInColumn(-1.0f) && !DangerInColumn(1.0f))
-	{
-		m_aInputData[Dummy].m_Jump = 0;
-		Blocked = true;
-	}
-
-	// Optional: fall protection. Simulate the gravity trajectory; if it ends in a void, brake the
-	// horizontal velocity so we don't run/slide off a ledge into the void below.
-	if(g_Config.m_TcAntiVoidFallProtection)
-	{
-		vec2 p = CharPos;
-		vec2 v = Vel;
-		const float Gravity = 0.5f;
-		const int SimTicks = 18;
-		bool WillFallIntoVoid = false;
-		for(int i = 0; i < SimTicks; ++i)
-		{
-			v.y += Gravity;
-			p += v;
-			if(AntiVoidDangerAt(p.x, p.y) || AntiVoidDangerAt(p.x, p.y + R) || AntiVoidDangerAt(p.x - R * 0.6f, p.y + R) || AntiVoidDangerAt(p.x + R * 0.6f, p.y + R))
+			vec2 RescueDir;
+			bool CanWait;
+			if(RescueHookAim(RescueDir, &CanWait) && !CanWait)
 			{
-				WillFallIntoVoid = true;
-				break;
+				m_aRescueHookHold[Dummy] = 250; // hard cap ~5s; normally released the moment dropping is safe again
+				m_aRescueHookThrown[Dummy] = false;
+				m_aRescueHookHeld[Dummy] = false;
+				RescueHookUpkeep(Input); // act this very tick: throw straight away, or release the old hook first
+				if(g_Config.m_TcAntiVoidDebug)
+					AvoidDebugDump("rescue hook engaged", RawDeath);
+				ApplyFreezeWall();
+				s_aWasBlocking[Dummy] = true;
+				return;
 			}
 		}
-		if(WillFallIntoVoid && absolute(Vel.x) > BrakeThreshold)
-		{
-			Dir = (Vel.x > 0.0f) ? -1 : 1; // counter the horizontal drift toward the ledge
-			Blocked = true;
-		}
+		// Nothing to do: either we can still wait, or we're committed with no rescue. Keep player input.
+		if(!StrictSuppress)
+			m_aAvoidHookSuppressed[Dummy] = false; // we are not holding your hook off this tick
+		if(g_Config.m_TcAntiVoidDebug >= 2 || (g_Config.m_TcAntiVoidDebug && s_aWasBlocking[Dummy]))
+			AvoidDebugDump("wait: death is coming but the last moment has not arrived", RawDeath);
+		ApplyFreezeWall();
+		s_aWasBlocking[Dummy] = false;
+		return;
 	}
 
-	// Optional: hysteresis. Hold the brake direction for a few extra ticks so it doesn't flicker on the edge.
-	if(g_Config.m_TcAntiVoidSmoothing > 0)
-	{
-		if(Blocked)
-		{
-			m_aAntiVoidHold[Dummy] = g_Config.m_TcAntiVoidSmoothing;
-			m_aAntiVoidHoldDir[Dummy] = Dir;
-		}
-		else if(m_aAntiVoidHold[Dummy] > 0)
-		{
-			m_aAntiVoidHold[Dummy]--;
-			Dir = m_aAntiVoidHoldDir[Dummy];
-			Blocked = true;
-		}
-	}
+	// Report BEFORE the override is written into the input: the dump re-runs the simulation, so it has to
+	// see the untouched player input — otherwise every what-if number would already contain our own change.
+	if(g_Config.m_TcAntiVoidDebug >= 2 || (g_Config.m_TcAntiVoidDebug && !s_aWasBlocking[Dummy]))
+		AvoidDebugDump(pReason, RawDeath, KEEP_DIR, DoBlockHook);
 
-	// Optional debug log, only on state change so it doesn't spam.
-	if(g_Config.m_TcAntiVoidDebug)
+	if(DoBlockHook)
 	{
-		static bool s_aWasBlocked[NUM_DUMMIES] = {false, false};
-		if(Blocked != s_aWasBlocked[Dummy])
-		{
-			s_aWasBlocked[Dummy] = Blocked;
-			log_info("anti-void", "%s", Blocked ? "braking (danger on trajectory)" : "clear");
-		}
+		Input.m_Hook = 0;
+		m_aAvoidHookSuppressed[Dummy] = true; // remember we are holding your hook off, for the resume latch
 	}
+	else if(!StrictSuppress)
+		m_aAvoidHookSuppressed[Dummy] = false;
+	ApplyFreezeWall();
+
+	s_aWasBlocking[Dummy] = true;
 }
 
 // TClient balancer: is this tee "in the void"? The question is really "does the tee have somewhere safe to
@@ -864,6 +1531,127 @@ bool CControls::ApplyBalancer()
 		log_info("balancer", "%s (offset %.0fpx, edge %.0f)", Rescue ? "rescuing" : "released (within safe zone)", OffsetX, Edge);
 	s_aRescuing[Dummy] = Rescue;
 	return true; // engaged on an in-void tee (whether actively rescuing or holding within the safe zone)
+}
+
+// TClient hole assist: scan the tiles in a box around the tee for the nearest narrow gap. A "gap" is a run
+// of open (non-solid) tiles in a single row that is bounded by a solid tile on BOTH ends and is at most
+// 2 tiles wide — i.e. a slot in a wall you could fall/fly through, not the open corridor you are standing
+// in. Returns the world-x of the center of the gap whose center is horizontally closest to us. Off-map
+// tiles count as solid so a gap right at the map edge is still bounded correctly.
+bool CControls::FindNearestHoleX(float &OutX) const
+{
+	// Use the predicted core position (tick-quantized), not the render-smoothed LocalCharPos, so the choice
+	// of gap and all the steering below are frame-rate independent.
+	const vec2 Pos = GameClient()->m_PredictedChar.m_Pos;
+	const int Tx0 = (int)(Pos.x / 32.0f);
+	const int Ty0 = (int)(Pos.y / 32.0f);
+	const int Rx = 10; // search range sideways, in tiles
+	const int Up = 8, Down = 8; // search range above/below, in tiles
+	const int MaxW = 2; // widest opening that still counts as a "hole"
+	const int W = Collision()->GetWidth();
+	const int H = Collision()->GetHeight();
+
+	auto Solid = [&](int tx, int ty) -> bool {
+		if(tx < 0 || ty < 0 || tx >= W || ty >= H)
+			return true; // off the map = wall boundary, so edge gaps are still bounded
+		return Collision()->CheckPoint(tx * 32.0f + 16.0f, ty * 32.0f + 16.0f);
+	};
+
+	bool Found = false;
+	float BestDist = 1e30f;
+	for(int ty = Ty0 - Up; ty <= Ty0 + Down; ++ty)
+	{
+		int col = Tx0 - Rx;
+		while(col <= Tx0 + Rx)
+		{
+			if(Solid(col, ty)) // walls are not gaps; step past
+			{
+				++col;
+				continue;
+			}
+			// Start of an open run at [Start .. End]. Extend it while still open and within the window.
+			const int Start = col;
+			int End = Start;
+			while(End + 1 <= Tx0 + Rx && !Solid(End + 1, ty))
+				++End;
+			const int Len = End - Start + 1;
+			// Must be pinched by a wall on both sides and no wider than the configured max to count as a hole.
+			if(Len <= MaxW && Solid(Start - 1, ty) && Solid(End + 1, ty))
+			{
+				const float Cx = (float)(Start + End + 1) * 16.0f; // world-x of the run's center
+				const float Dist = absolute(Cx - Pos.x);
+				if(Dist < BestDist)
+				{
+					BestDist = Dist;
+					OutX = Cx;
+					Found = true;
+				}
+			}
+			col = End + 1;
+		}
+	}
+	return Found;
+}
+
+// TClient hole assist: steer left/right/stop so the tee comes to rest centered on the nearest gap.
+// Counter-strafe controller: while we'd still overshoot the gap at the current speed, brake against our
+// motion; otherwise drive toward it. Everything runs on the predicted core position/velocity (tick-quantized)
+// so it behaves identically at any frame rate. A small dead zone plus a settle latch stop it from jittering
+// by a pixel once parked, without the passive-coast prediction that misjudged airborne moves.
+// Only ever touches m_Direction; jump/hook stay yours.
+void CControls::ApplyHoleAssist()
+{
+	const int Dummy = g_Config.m_ClDummy;
+
+	float TargetX;
+	if(!FindNearestHoleX(TargetX))
+	{
+		m_aHoleSettled[Dummy] = false;
+		return;
+	}
+
+	const CCharacterCore &Core = GameClient()->m_PredictedChar;
+	const float Px = Core.m_Pos.x;
+	const float Vx = Core.m_Vel.x;
+	const float Err = TargetX - Px; // + = gap is to our right
+	const float Lock = 3.0f; // dead zone half-width around the gap center, in pixels
+	const float Reengage = 10.0f; // must drift this far off-center before we start correcting again
+	const float VelEps = 0.4f;
+	// Braking distance grows LINEARLY with speed (ground friction decays velocity geometrically, so the real
+	// stop distance is ~proportional to speed, not speed^2). tc_hole_assist_brake (tenths) is the proportion:
+	// 10 => brake when the gap is closer than 1.0x our current speed. Lower brakes later / carries more speed.
+	const float StopDist = ((float)g_Config.m_TcHoleAssistBrake / 10.0f) * absolute(Vx);
+
+	int &Dir = m_aInputData[Dummy].m_Direction;
+
+	// Parked on the gap: hold still until we drift well off center, so we don't micro-correct every tick.
+	if(m_aHoleSettled[Dummy])
+	{
+		if(absolute(Err) > Reengage)
+			m_aHoleSettled[Dummy] = false;
+		else
+		{
+			Dir = 0;
+			return;
+		}
+	}
+
+	// Centered and nearly stopped -> lock in and stop steering.
+	if(absolute(Err) <= Lock && absolute(Vx) <= VelEps)
+	{
+		Dir = 0;
+		m_aHoleSettled[Dummy] = true;
+	}
+	else if(Err > 0.0f)
+	{
+		// Gap to the right: brake if we're heading right fast enough to overshoot it, else drive right.
+		Dir = (Vx > VelEps && StopDist >= Err) ? -1 : 1;
+	}
+	else
+	{
+		// Gap to the left: brake if we're heading left fast enough to overshoot it, else drive left.
+		Dir = (Vx < -VelEps && StopDist >= -Err) ? 1 : -1;
+	}
 }
 
 // TClient: rocket (grenade) counter. Independent of the braking anti-void (tc_anti_void): if we carry
@@ -1122,64 +1910,74 @@ void CControls::OnRender()
 	{
 		m_aTargetPos[g_Config.m_ClDummy] = m_aMousePos[g_Config.m_ClDummy];
 	}
+}
 
-	// TClient: anti-void visual overlay (also shown while paused/spectating, where the feature still runs)
-	if(g_Config.m_TcAntiVoid && g_Config.m_TcAntiVoidShow && HaveLocalChar())
+void CControls::CAvoidOverlay::OnRender()
+{
+	GameClient()->m_Controls.RenderAvoidOverlay();
+}
+
+// TClient: anti-void visual overlay (also shown while paused/spectating, where the feature still runs).
+// Called from CControls::CAvoidOverlay, which is registered after the map layers so this actually
+// ends up on top of the tilemap instead of under it.
+void CControls::RenderAvoidOverlay()
+{
+	if(!g_Config.m_TcAntiVoid || !g_Config.m_TcAntiVoidShow || !HaveLocalChar())
+		return;
+
+	const vec2 Center = GameClient()->m_Camera.m_Center;
+	const float Zoom = GameClient()->m_Camera.m_Zoom;
+	float aSavedScreen[4];
+	Graphics()->GetScreen(&aSavedScreen[0], &aSavedScreen[1], &aSavedScreen[2], &aSavedScreen[3]);
+	Graphics()->MapScreenToInterface(Center.x, Center.y, Zoom);
+
+	const vec2 CharPos = LocalCharPos();
+
+	Graphics()->TextureClear();
+	Graphics()->QuadsBegin();
+
+	// Translucent fill over every tile anti-void currently treats as dangerous (near the player)
+	const int Range = 16;
+	const int Cx = (int)(CharPos.x / 32.0f);
+	const int Cy = (int)(CharPos.y / 32.0f);
+	Graphics()->SetColor(1.0f, 0.0f, 0.0f, 0.22f);
+	for(int ty = Cy - Range; ty <= Cy + Range; ++ty)
 	{
-		const vec2 Center = GameClient()->m_Camera.m_Center;
-		const float Zoom = GameClient()->m_Camera.m_Zoom;
-		float aSavedScreen[4];
-		Graphics()->GetScreen(&aSavedScreen[0], &aSavedScreen[1], &aSavedScreen[2], &aSavedScreen[3]);
-		Graphics()->MapScreenToInterface(Center.x, Center.y, Zoom);
-
-		const vec2 CharPos = LocalCharPos();
-		const vec2 Vel = GameClient()->m_PredictedChar.m_Vel;
-		const float R = 28.0f;
-
-		Graphics()->TextureClear();
-		Graphics()->QuadsBegin();
-
-		// Translucent fill over every tile anti-void currently treats as dangerous (near the player)
-		const int Range = 16;
-		const int Cx = (int)(CharPos.x / 32.0f);
-		const int Cy = (int)(CharPos.y / 32.0f);
-		Graphics()->SetColor(1.0f, 0.0f, 0.0f, 0.22f);
-		for(int ty = Cy - Range; ty <= Cy + Range; ++ty)
+		for(int tx = Cx - Range; tx <= Cx + Range; ++tx)
 		{
-			for(int tx = Cx - Range; tx <= Cx + Range; ++tx)
-			{
-				if(tx < 0 || ty < 0 || tx >= Collision()->GetWidth() || ty >= Collision()->GetHeight())
-					continue;
-				if(!AntiVoidDangerAt(tx * 32.0f + 16.0f, ty * 32.0f + 16.0f))
-					continue;
-				IGraphics::CQuadItem Quad(tx * 32.0f, ty * 32.0f, 32.0f, 32.0f);
-				Graphics()->QuadsDrawTL(&Quad, 1);
-			}
-		}
-
-		// Sample-point markers (green = clear, red = danger)
-		const float LookTicks = 8.0f;
-		const float SideTriggerDist = (float)g_Config.m_TcAntiVoidSideDistance;
-		const float VertTriggerDist = (float)g_Config.m_TcAntiVoidDistance;
-		const float MaxLook = maximum(maximum(SideTriggerDist, VertTriggerDist), 32.0f * 8.0f);
-		const float SideLook = std::clamp(absolute(Vel.x) * LookTicks, SideTriggerDist, MaxLook);
-
-		auto DrawPoint = [&](float x, float y) {
-			if(AntiVoidDangerAt(x, y))
-				Graphics()->SetColor(1.0f, 0.2f, 0.2f, 0.95f);
-			else
-				Graphics()->SetColor(0.2f, 1.0f, 0.2f, 0.95f);
-			IGraphics::CQuadItem Quad(x - 3.0f, y - 3.0f, 6.0f, 6.0f);
+			if(tx < 0 || ty < 0 || tx >= Collision()->GetWidth() || ty >= Collision()->GetHeight())
+				continue;
+			if(AvoidDangerClass(tx * 32.0f + 16.0f, ty * 32.0f + 16.0f) == 0)
+				continue;
+			IGraphics::CQuadItem Quad(tx * 32.0f, ty * 32.0f, 32.0f, 32.0f);
 			Graphics()->QuadsDrawTL(&Quad, 1);
-		};
-		DrawPoint(CharPos.x + SideLook, CharPos.y);
-		DrawPoint(CharPos.x - SideLook, CharPos.y);
-		DrawPoint(CharPos.x, CharPos.y - (VertTriggerDist + R));
-		DrawPoint(CharPos.x, CharPos.y + (VertTriggerDist + R));
-
-		Graphics()->QuadsEnd();
-		Graphics()->MapScreen(aSavedScreen[0], aSavedScreen[1], aSavedScreen[2], aSavedScreen[3]);
+		}
 	}
+
+	// Predicted path for the current input: one dot per simulated tick, red once the sim dies
+	{
+		CCharacterCore Core = GameClient()->m_PredictedChar;
+		Core.Init(nullptr, Collision());
+		Core.SetHookedPlayer(-1);
+		// Use the pre-avoid input so the path shows what your OWN input would do (not the hook
+		// avoid may have already zeroed this frame), which is what you want to eyeball.
+		Core.m_Input = m_aAvoidRawInput[g_Config.m_ClDummy];
+		bool Dead = false;
+		for(int i = 0; i < g_Config.m_TcAvoidCheckTicks; ++i)
+		{
+			Core.Tick(true);
+			Core.Move();
+			Core.Quantize();
+			if(!Dead && AvoidDangerClass(Core.m_Pos.x, Core.m_Pos.y) != 0)
+				Dead = true;
+			Graphics()->SetColor(Dead ? 1.0f : 0.2f, Dead ? 0.2f : 1.0f, 0.2f, 0.95f);
+			IGraphics::CQuadItem Quad(Core.m_Pos.x - 2.0f, Core.m_Pos.y - 2.0f, 4.0f, 4.0f);
+			Graphics()->QuadsDrawTL(&Quad, 1);
+		}
+	}
+
+	Graphics()->QuadsEnd();
+	Graphics()->MapScreen(aSavedScreen[0], aSavedScreen[1], aSavedScreen[2], aSavedScreen[3]);
 }
 
 bool CControls::OnCursorMove(float x, float y, IInput::ECursorType CursorType)
@@ -1293,6 +2091,9 @@ bool CControls::CheckNewInput()
 				TestInput.m_Direction = -1;
 			if(!m_aInputDirectionLeft[Dummy] && m_aInputDirectionRight[Dummy])
 				TestInput.m_Direction = 1;
+			// TClient: mirror the SnapInput rebuild so fast-input detects a press/release of the hook key
+			// straight away, even though the key now feeds the shadow m_aInputHook instead of m_aInputData.
+			TestInput.m_Hook = m_aInputHook[Dummy];
 		}
 
 		if(m_aFastInput[Dummy].m_Direction != TestInput.m_Direction)

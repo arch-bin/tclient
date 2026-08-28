@@ -876,6 +876,7 @@ private:
 	void RenderSettingsMyForkWeaponSpin(CUIRect MainView);
 	void RenderSettingsMyForkHookAim(CUIRect MainView);
 	void RenderSettingsMyForkBalancer(CUIRect MainView);
+	void RenderSettingsMyForkHoleAssist(CUIRect MainView);
 	void RenderSettingsMyForkChatSafety(CUIRect MainView);
 	void RenderSettingsMyForkSocks5(CUIRect MainView);
 	// Proxy manager (shared by My Fork "Прокси" tab and the start-page popup).

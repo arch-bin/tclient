@@ -1471,7 +1471,7 @@ void CMenus::RenderSettings(CUIRect MainView)
 		Localize("DDNet"),
 		Localize("Assets"),
 		TCLocalize("TClient"),
-		"Мой форк",
+		"My Fork",
 		Localize("Profiles"),
 		Localize("Configs")};
 

@@ -557,7 +557,12 @@ void CMenus::RenderSettingsTClientSettings(CUIRect MainView)
 	Ui()->DoLabel(&Label, TCLocalize("Input"), HeadlineFontSize, TEXTALIGN_ML);
 	Column.HSplitTop(MarginSmall, nullptr, &Column);
 
-	DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcFastInput, TCLocalize("Fast Input (reduced visual delay)"), &g_Config.m_TcFastInput, &Column, LineSize);
+	// TClient: avoid overrides the input once per tick while fast input reships the raw keys every frame,
+	// so avoid force-disables it (see CGameClient::FastInputEnabled). Say so instead of leaving a checkbox
+	// that looks enabled but does nothing.
+	DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcFastInput,
+		g_Config.m_TcAntiVoid ? TCLocalize("Fast Input (off while Avoid is on)") : TCLocalize("Fast Input (reduced visual delay)"),
+		&g_Config.m_TcFastInput, &Column, LineSize);
 
 	Column.HSplitTop(LineSize, &Button, &Column);
 	DoSliderWithScaledValue(&g_Config.m_TcFastInputAmount, &g_Config.m_TcFastInputAmount, &Button, TCLocalize("Amount"), 1, 40, 1, &CUi::ms_LinearScrollbarScale, CUi::SCROLLBAR_OPTION_NOCLAMPVALUE, "ms");
@@ -2960,6 +2965,7 @@ enum
 	MYFORK_TAB_WEAPONSPIN,
 	MYFORK_TAB_HOOKAIM,
 	MYFORK_TAB_BALANCER,
+	MYFORK_TAB_HOLEASSIST,
 	MYFORK_TAB_CHATSAFETY,
 	MYFORK_TAB_SOCKS5,
 	NUMBER_OF_MYFORK_TABS
@@ -3000,12 +3006,13 @@ void CMenus::RenderSettingsMyFork(CUIRect MainView)
 
 	static CButtonContainer s_aForkTabs[NUMBER_OF_MYFORK_TABS] = {};
 	const char *apTabNames[] = {
-		"Анти-войд",
-		"Крутилка оружия",
-		"Наведение крюка",
-		"Балансер",
-		"Защита в чате",
-		"Прокси"};
+		"Avoid",
+		"Weapon Spin",
+		"Hook Aim",
+		"Balancer",
+		"Hole Assist",
+		"Chat Safety",
+		"Proxy"};
 
 	const float TabWidth = TabBar.w / (float)NUMBER_OF_MYFORK_TABS;
 	for(int Tab = 0; Tab < NUMBER_OF_MYFORK_TABS; ++Tab)
@@ -3027,6 +3034,8 @@ void CMenus::RenderSettingsMyFork(CUIRect MainView)
 		RenderSettingsMyForkHookAim(MainView);
 	else if(s_CurForkTab == MYFORK_TAB_BALANCER)
 		RenderSettingsMyForkBalancer(MainView);
+	else if(s_CurForkTab == MYFORK_TAB_HOLEASSIST)
+		RenderSettingsMyForkHoleAssist(MainView);
 	else if(s_CurForkTab == MYFORK_TAB_CHATSAFETY)
 		RenderSettingsMyForkChatSafety(MainView);
 	else if(s_CurForkTab == MYFORK_TAB_SOCKS5)
@@ -3054,14 +3063,12 @@ void CMenus::RenderSettingsMyForkChatSafety(CUIRect MainView)
 		}
 	};
 
-	Section("Защита в чате", "Сервер игнорирует движение и стрельбу, пока у вас открыт чат, поэтому анти-войд, балансер и ракета обычно перестают работать, как только вы начинаете печатать. С этой опцией клиент, пока включена любая из защит, шлёт ввод как «в игре» — и защиты продолжают работать в чате.");
-	DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcSafetyInChat, "Защиты работают, пока открыт чат", &g_Config.m_TcSafetyInChat, &Column, LineSize);
+	Section("Chat Safety", "");
+	DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcSafetyInChat, "Keep safety features active while chat is open", &g_Config.m_TcSafetyInChat, &Column, LineSize);
 
-	Section("Учтите", "Побочный эффект: пока включена любая защита, другие игроки не увидят «пузырь», что вы печатаете в чате. На меню это не влияет — там защиты работают и так.");
-
-	Section("Бинд", "Назначьте клавишу для быстрого вкл/выкл.");
+	Section("Bind", "");
 	static CButtonContainer s_ReaderChatSafety, s_ClearChatSafety;
-	DoLine_KeyReader(Column, s_ReaderChatSafety, s_ClearChatSafety, "Клавиша вкл/выкл защиты в чате", "toggle tc_safety_in_chat 0 1");
+	DoLine_KeyReader(Column, s_ReaderChatSafety, s_ClearChatSafety, "Toggle chat safety key", "toggle tc_safety_in_chat 0 1");
 
 	MyForkEndColumn(&s_ScrollRegion, Column);
 }
@@ -3087,18 +3094,18 @@ void CMenus::RenderSettingsMyForkHookAim(CUIRect MainView)
 		}
 	};
 
-	Section("Наведение крюка", "При зажатом крюке подводит прицел к ближайшему игроку в пределах досягаемости и прямой видимости.");
-	DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcHookAim, "Включить наведение крюка", &g_Config.m_TcHookAim, &Column, LineSize);
+	Section("Hook Aim", "");
+	DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcHookAim, "Enable hook aim", &g_Config.m_TcHookAim, &Column, LineSize);
 	if(g_Config.m_TcHookAim)
 	{
-		Section("Угол наведения", "Максимальный угол в градусах, в пределах которого крюк притянется к игроку.");
+		Section("Aim angle", "");
 		Column.HSplitTop(LineSize, &Button, &Column);
-		Ui()->DoScrollbarOption(&g_Config.m_TcHookAimAngle, &g_Config.m_TcHookAimAngle, &Button, "Угол наведения", 1, 180, &CUi::ms_LinearScrollbarScale, CUi::SCROLLBAR_OPTION_NOCLAMPVALUE, " °");
+		Ui()->DoScrollbarOption(&g_Config.m_TcHookAimAngle, &g_Config.m_TcHookAimAngle, &Button, "Aim angle", 1, 180, &CUi::ms_LinearScrollbarScale, CUi::SCROLLBAR_OPTION_NOCLAMPVALUE, " °");
 	}
 
-	Section("Бинд", "Назначьте клавишу для быстрого вкл/выкл.");
+	Section("Bind", "");
 	static CButtonContainer s_ReaderHookAim, s_ClearHookAim;
-	DoLine_KeyReader(Column, s_ReaderHookAim, s_ClearHookAim, "Клавиша вкл/выкл наведения крюка", "toggle tc_hook_aim 0 1");
+	DoLine_KeyReader(Column, s_ReaderHookAim, s_ClearHookAim, "Toggle hook aim key", "toggle tc_hook_aim 0 1");
 
 	MyForkEndColumn(&s_ScrollRegion, Column);
 }
@@ -3124,8 +3131,8 @@ void CMenus::RenderSettingsMyForkBalancer(CUIRect MainView)
 		}
 	};
 
-	Section("Балансер", "Работает, только когда ти, на котором вы стоите, находится над войдом. Не перехватывает управление: пока вы держитесь на голове, движение свободно, и лишь когда вы начинаете соскальзывать к краю (почти в войд) — подправляет вас обратно к центру.");
-	DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcBalancer, "Включить балансер", &g_Config.m_TcBalancer, &Column, LineSize);
+	Section("Balancer", "");
+	DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcBalancer, "Enable balancer", &g_Config.m_TcBalancer, &Column, LineSize);
 	if(g_Config.m_TcBalancer)
 	{
 		// Slider that stores pixels but displays the value in tiles (32px = 1 tile).
@@ -3134,7 +3141,7 @@ void CMenus::RenderSettingsMyForkBalancer(CUIRect MainView)
 			CUIRect SliderLabel, ScrollBar;
 			Button.VSplitMid(&SliderLabel, &ScrollBar, minimum(10.0f, Button.w * 0.05f));
 			char aBuf[128];
-			str_format(aBuf, sizeof(aBuf), "%s: %.2f тайла", pLabel, *pConfig / 32.0f);
+			str_format(aBuf, sizeof(aBuf), "%s: %.2f tiles", pLabel, *pConfig / 32.0f);
 			const float SliderFontSize = SliderLabel.h * CUi::ms_FontmodHeight * 0.8f;
 			Ui()->DoLabel(&SliderLabel, aBuf, SliderFontSize, TEXTALIGN_ML);
 			int Value = std::clamp(*pConfig, MinPx, MaxPx);
@@ -3142,37 +3149,36 @@ void CMenus::RenderSettingsMyForkBalancer(CUIRect MainView)
 			*pConfig = Value;
 		};
 
-		Section("Дистанция срабатывания", "Насколько близко должна быть цель, чтобы балансер включился. 32px = 1 тайл.");
-		DoTileDistanceSlider(&g_Config.m_TcBalancerDistance, "Дистанция до цели", 16, 640);
+		Section("Trigger distance", "");
+		DoTileDistanceSlider(&g_Config.m_TcBalancerDistance, "Distance to target", 16, 640);
 
-		Section("Условие войда", "Балансер включается, только если под ти нет безопасной земли в пределах этой глубины (тайлы смерти/фриза или край карты = войд).");
+		Section("Void depth", "");
 		Column.HSplitTop(LineSize, &Button, &Column);
-		Ui()->DoScrollbarOption(&g_Config.m_TcBalancerVoidDepth, &g_Config.m_TcBalancerVoidDepth, &Button, "Глубина проверки войда", 1, 40, &CUi::ms_LinearScrollbarScale, CUi::SCROLLBAR_OPTION_NOCLAMPVALUE, " тайла");
+		Ui()->DoScrollbarOption(&g_Config.m_TcBalancerVoidDepth, &g_Config.m_TcBalancerVoidDepth, &Button, "Void check depth", 1, 40, &CUi::ms_LinearScrollbarScale, CUi::SCROLLBAR_OPTION_NOCLAMPVALUE, " tiles");
 
-		Section("Спасение у края", "Насколько можно отъехать от центра головы, прежде чем балансер вернёт вас. Меньше = спасает раньше/строже, больше = больше свободы (радиус головы ~28px).");
+		Section("Edge rescue", "");
 		Column.HSplitTop(LineSize, &Button, &Column);
-		Ui()->DoScrollbarOption(&g_Config.m_TcBalancerEdge, &g_Config.m_TcBalancerEdge, &Button, "Порог края", 0, 28, &CUi::ms_LinearScrollbarScale, CUi::SCROLLBAR_OPTION_NOCLAMPVALUE, " px");
+		Ui()->DoScrollbarOption(&g_Config.m_TcBalancerEdge, &g_Config.m_TcBalancerEdge, &Button, "Edge threshold", 0, 28, &CUi::ms_LinearScrollbarScale, CUi::SCROLLBAR_OPTION_NOCLAMPVALUE, " px");
 
-		Section("Поведение", "Когда балансеру разрешено цепляться к цели.");
-		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcBalancerOnlyAbove, "Только когда вы выше цели (на голове)", &g_Config.m_TcBalancerOnlyAbove, &Column, LineSize);
-		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcBalancerDisableRocket, "Отключать ракетный анти-войд, пока работает балансер", &g_Config.m_TcBalancerDisableRocket, &Column, LineSize);
-		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcBalancerDebug, "Логировать в консоль (для настройки)", &g_Config.m_TcBalancerDebug, &Column, LineSize);
+		Section("Behavior", "");
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcBalancerOnlyAbove, "Only when you are above the target (on the head)", &g_Config.m_TcBalancerOnlyAbove, &Column, LineSize);
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcBalancerDisableRocket, "Disable rocket anti-void while balancer is active", &g_Config.m_TcBalancerDisableRocket, &Column, LineSize);
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcBalancerDebug, "Log to console (for tuning)", &g_Config.m_TcBalancerDebug, &Column, LineSize);
 
-		Section("Бинд", "Назначьте клавишу для быстрого вкл/выкл.");
+		Section("Bind", "");
 		static CButtonContainer s_ReaderBalancer, s_ClearBalancer;
-		DoLine_KeyReader(Column, s_ReaderBalancer, s_ClearBalancer, "Клавиша вкл/выкл балансера", "tc_balancer_toggle");
+		DoLine_KeyReader(Column, s_ReaderBalancer, s_ClearBalancer, "Toggle balancer key", "tc_balancer_toggle");
 	}
 
 	MyForkEndColumn(&s_ScrollRegion, Column);
 }
 
-void CMenus::RenderSettingsMyForkAntiVoid(CUIRect MainView)
+void CMenus::RenderSettingsMyForkHoleAssist(CUIRect MainView)
 {
 	CUIRect Column, Label, Button;
 	static CScrollRegion s_ScrollRegion;
 	MyForkBeginColumn(&s_ScrollRegion, MainView, &Column);
 
-	// Section header with an optional muted one-line description underneath.
 	auto Section = [&](const char *pTitle, const char *pDesc) {
 		Column.HSplitTop(Margin, nullptr, &Column);
 		Column.HSplitTop(HeadlineHeight, &Label, &Column);
@@ -3188,91 +3194,174 @@ void CMenus::RenderSettingsMyForkAntiVoid(CUIRect MainView)
 		}
 	};
 
-	Section("Анти-войд", "Тормозит (контр-страйф) и отпускает крюк, когда траектория ведёт в смерть/фриз.");
-	DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoid, "Включить анти-войд", &g_Config.m_TcAntiVoid, &Column, LineSize);
-	if(g_Config.m_TcAntiVoid)
+	Section("Hole Assist", "");
+	DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcHoleAssist, "Enable hole assist", &g_Config.m_TcHoleAssist, &Column, LineSize);
+	if(g_Config.m_TcHoleAssist)
 	{
-		// Slider that stores pixels but displays the value in tiles (allows sub-tile distances, 32px = 1 tile)
-		auto DoTileDistanceSlider = [&](int *pConfig, const char *pLabel, int MinPx, int MaxPx) {
-			Column.HSplitTop(LineSize, &Button, &Column);
-			CUIRect SliderLabel, ScrollBar;
-			Button.VSplitMid(&SliderLabel, &ScrollBar, minimum(10.0f, Button.w * 0.05f));
-			char aBuf[128];
-			str_format(aBuf, sizeof(aBuf), "%s: %.2f тайла", pLabel, *pConfig / 32.0f);
-			const float SliderFontSize = SliderLabel.h * CUi::ms_FontmodHeight * 0.8f;
-			Ui()->DoLabel(&SliderLabel, aBuf, SliderFontSize, TEXTALIGN_ML);
-			int Value = std::clamp(*pConfig, MinPx, MaxPx);
-			Value = CUi::ms_LinearScrollbarScale.ToAbsolute(Ui()->DoScrollbarH(pConfig, &ScrollBar, CUi::ms_LinearScrollbarScale.ToRelative(Value, MinPx, MaxPx)), MinPx, MaxPx);
-			*pConfig = Value;
-		};
+		Section("Activation mode", "");
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcHoleAssistHold, "Hold to activate (off = toggle)", &g_Config.m_TcHoleAssistHold, &Column, LineSize);
 
-		Section("Дистанции срабатывания", "32 пикселя = 1 тайл. Меньше = реагирует ближе к войду.");
-		DoTileDistanceSlider(&g_Config.m_TcAntiVoidSideDistance, "Боковая дистанция", 0, 320);
-		DoTileDistanceSlider(&g_Config.m_TcAntiVoidDistance, "Дистанция вверх/хук", 4, 320);
-		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoidVertical, "Вертикальный анти-войд (отпускать крюк/блок прыжка в потолок). Выкл = только боковой", &g_Config.m_TcAntiVoidVertical, &Column, LineSize);
-
-		Section("Типы тайлов для избегания", "Какие опасные тайлы учитывать (по умолчанию все).");
-		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoidDeath, "Тайлы смерти (kill)", &g_Config.m_TcAntiVoidDeath, &Column, LineSize);
-		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoidFreeze, "Тайлы фриза", &g_Config.m_TcAntiVoidFreeze, &Column, LineSize);
-		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoidDeepFreeze, "Тайлы глубокого фриза (deep)", &g_Config.m_TcAntiVoidDeepFreeze, &Column, LineSize);
-		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoidLiveFreeze, "Тайлы живого фриза (live)", &g_Config.m_TcAntiVoidLiveFreeze, &Column, LineSize);
-
-		Section("Доп. поведение", "Опционально (по умолчанию выключено).");
-		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoidFallProtection, "Защита от падения (не сбежать с края в войд)", &g_Config.m_TcAntiVoidFallProtection, &Column, LineSize);
-		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoidBlockJump, "Блокировать прыжок в потолок фриз/смерть", &g_Config.m_TcAntiVoidBlockJump, &Column, LineSize);
-		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoidTrajectory, "Сэмплить весь путь (ловит тонкий войд на скорости)", &g_Config.m_TcAntiVoidTrajectory, &Column, LineSize);
+		Section("Braking point", "");
 		Column.HSplitTop(LineSize, &Button, &Column);
-		Ui()->DoScrollbarOption(&g_Config.m_TcAntiVoidSmoothing, &g_Config.m_TcAntiVoidSmoothing, &Button, "Удержание (анти-дёрганье)", 0, 20, &CUi::ms_LinearScrollbarScale, CUi::SCROLLBAR_OPTION_NOCLAMPVALUE, " тиков");
+		Ui()->DoScrollbarOption(&g_Config.m_TcHoleAssistBrake, &g_Config.m_TcHoleAssistBrake, &Button, "Braking point", 2, 60, &CUi::ms_LinearScrollbarScale, CUi::SCROLLBAR_OPTION_NOCLAMPVALUE, "");
 
-		Section("Узкие места", "Авто-отключение в тесных коридорах, чтобы анти-войд не мешал.");
-		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoidNarrowDisable, "Отключать в узких местах", &g_Config.m_TcAntiVoidNarrowDisable, &Column, LineSize);
-		if(g_Config.m_TcAntiVoidNarrowDisable)
-		{
-			Column.HSplitTop(LineSize, &Button, &Column);
-			Ui()->DoScrollbarOption(&g_Config.m_TcAntiVoidNarrowWidth, &g_Config.m_TcAntiVoidNarrowWidth, &Button, "Ширина по горизонтали", 1, 20, &CUi::ms_LinearScrollbarScale, CUi::SCROLLBAR_OPTION_NOCLAMPVALUE, " тайла");
-			Column.HSplitTop(LineSize, &Button, &Column);
-			Ui()->DoScrollbarOption(&g_Config.m_TcAntiVoidNarrowHeight, &g_Config.m_TcAntiVoidNarrowHeight, &Button, "Высота по вертикали", 1, 20, &CUi::ms_LinearScrollbarScale, CUi::SCROLLBAR_OPTION_NOCLAMPVALUE, " тайла");
-		}
-
-		Section("Отладка", "Визуализация и логи для настройки.");
-		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoidShow, "Показать оверлей (опасные тайлы + точки)", &g_Config.m_TcAntiVoidShow, &Column, LineSize);
-		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoidDebug, "Логировать торможение в консоль", &g_Config.m_TcAntiVoidDebug, &Column, LineSize);
-
-		Section("Бинд", "Назначьте клавишу для быстрого вкл/выкл.");
-		static CButtonContainer s_ReaderButtonAntiVoid, s_ClearButtonAntiVoid;
-		DoLine_KeyReader(Column, s_ReaderButtonAntiVoid, s_ClearButtonAntiVoid, "Клавиша вкл/выкл анти-войда", "tc_anti_void_toggle");
+		Section("Activation key", "");
+		static CButtonContainer s_ReaderHoleAssist, s_ClearHoleAssist;
+		DoLine_KeyReader(Column, s_ReaderHoleAssist, s_ClearHoleAssist, "Hole assist activation key", "+tc_hole_assist");
 	}
 
-	// Rocket counter is a SEPARATE feature: it works even when the braking anti-void above is off.
-	Section("Ракета (контр-войд)", "Отдельно от обычного анти-войда. Если в инвентаре есть гранатомёт, стреляет ракетой по направлению полёта в войд — взрыв отбрасывает обратно. Работает даже если обычный анти-войд выключен.");
-	DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoidRocket, "Контрить войд ракетой", &g_Config.m_TcAntiVoidRocket, &Column, LineSize);
-	if(g_Config.m_TcAntiVoidRocket)
+	MyForkEndColumn(&s_ScrollRegion, Column);
+}
+
+void CMenus::RenderSettingsMyForkAntiVoid(CUIRect MainView)
+{
+	CUIRect Button;
+	static CScrollRegion s_ScrollRegion;
+	vec2 ScrollOffset(0.0f, 0.0f);
+	CScrollRegionParams ScrollParams;
+	ScrollParams.m_ScrollUnit = 60.0f;
+	ScrollParams.m_Flags = CScrollRegionParams::FLAG_CONTENT_STATIC_WIDTH;
+	ScrollParams.m_ScrollbarMargin = 5.0f;
+	s_ScrollRegion.Begin(&MainView, &ScrollOffset, &ScrollParams);
+	MainView.y += ScrollOffset.y;
+	MainView.VSplitRight(5.0f, &MainView, nullptr);
+	MainView.VSplitLeft(10.0f, nullptr, &MainView);
+
+	// KRX-style layout: two columns of rounded cards, everything visible at once.
+	CUIRect LeftCol, RightCol;
+	MainView.VSplitMid(&LeftCol, &RightCol, Margin);
+
+	const float CardPad = 8.0f;
+	const float CardTitleFontSize = 16.0f;
+	const float CardTitleHeight = 18.0f;
+	const float CardRounding = 10.0f;
+
+	// A card's rounded background must be drawn before its content, so the content height is
+	// passed up front (in pixels). Returns the inner rect the widgets consume top-down.
+	auto BeginCard = [&](CUIRect *pCol, const char *pTitle, float ContentHeight) -> CUIRect {
+		CUIRect Panel, Inner, Title;
+		pCol->HSplitTop(CardTitleHeight + MarginSmall + ContentHeight + 2.0f * CardPad, &Panel, pCol);
+		pCol->HSplitTop(Margin, nullptr, pCol);
+		Panel.Draw(ColorRGBA(0.0f, 0.0f, 0.0f, 0.25f), IGraphics::CORNER_ALL, CardRounding);
+		Panel.Margin(CardPad, &Inner);
+		Inner.HSplitTop(CardTitleHeight, &Title, &Inner);
+		Ui()->DoLabel(&Title, pTitle, CardTitleFontSize, TEXTALIGN_ML);
+		Inner.HSplitTop(MarginSmall, nullptr, &Inner);
+		return Inner;
+	};
+
+	// ----- left column -----
+
+	// Main: master switch, NSIF fallback and AFK protection
 	{
+		CUIRect Card = BeginCard(&LeftCol, "Main", (g_Config.m_TcAvoidAfkProtection ? 4.0f : 3.0f) * LineSize);
+		static CButtonContainer s_EnableButton;
+		Card.HSplitTop(LineSize, &Button, &Card);
+		if(DoButtonLineSize_Menu(&s_EnableButton, "Enable", g_Config.m_TcAntiVoid, &Button, LineSize))
+			g_Config.m_TcAntiVoid ^= 1;
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAvoidNsif, "NSIF (no safe input found: take the longest-surviving one)", &g_Config.m_TcAvoidNsif, &Card, LineSize);
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAvoidAfkProtection, "Afk protection", &g_Config.m_TcAvoidAfkProtection, &Card, LineSize);
+		if(g_Config.m_TcAvoidAfkProtection)
+		{
+			Card.HSplitTop(LineSize, &Button, &Card);
+			Ui()->DoScrollbarOption(&g_Config.m_TcAvoidAfkSeconds, &g_Config.m_TcAvoidAfkSeconds, &Button, "Seconds", 1, 60, &CUi::ms_LinearScrollbarScale, CUi::SCROLLBAR_OPTION_NOCLAMPVALUE, " s");
+		}
+	}
+
+	// Settings: the prediction window and which inputs the bot may override
+	{
+		CUIRect Card = BeginCard(&LeftCol, "Settings", (4.0f + (g_Config.m_TcAvoidHook ? 1.0f : 0.0f)) * LineSize);
+		Card.HSplitTop(LineSize, &Button, &Card);
+		Ui()->DoScrollbarOption(&g_Config.m_TcAvoidCheckTicks, &g_Config.m_TcAvoidCheckTicks, &Button, "Check ticks", 5, 100, &CUi::ms_LinearScrollbarScale, CUi::SCROLLBAR_OPTION_NOCLAMPVALUE, " ticks");
+		Card.HSplitTop(LineSize, &Button, &Card);
+		Ui()->DoScrollbarOption(&g_Config.m_TcAvoidKickTicks, &g_Config.m_TcAvoidKickTicks, &Button, "Kick in ticks (hook)", 1, 50, &CUi::ms_LinearScrollbarScale, CUi::SCROLLBAR_OPTION_NOCLAMPVALUE, " ticks");
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAvoidHook, "Hook", &g_Config.m_TcAvoidHook, &Card, LineSize);
+		if(g_Config.m_TcAvoidHook)
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAvoidResumeHook, "Resume my hook once it's safe again (if I keep holding)", &g_Config.m_TcAvoidResumeHook, &Card, LineSize);
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAvoidDirection, "Direction (freeze walls only, no timings)", &g_Config.m_TcAvoidDirection, &Card, LineSize);
+	}
+
+	// Rescue hook: the last-resort aimbot throw when nothing milder saves you
+	{
+		CUIRect Card = BeginCard(&LeftCol, "Rescue hook (aimbot)", (g_Config.m_TcRescueHook ? 5.0f : 1.0f) * LineSize);
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcRescueHook, "Hook a saving surface when nothing else helps", &g_Config.m_TcRescueHook, &Card, LineSize);
+		if(g_Config.m_TcRescueHook)
+		{
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcRescueHookHoldMode, "Hold the grab until real footing (tap hook to take over)", &g_Config.m_TcRescueHookHoldMode, &Card, LineSize);
+			Card.HSplitTop(LineSize, &Button, &Card);
+			Ui()->DoScrollbarOption(&g_Config.m_TcRescueHookSegments, &g_Config.m_TcRescueHookSegments, &Button, "Segments", 4, 48, &CUi::ms_LinearScrollbarScale, CUi::SCROLLBAR_OPTION_NOCLAMPVALUE, "");
+			Card.HSplitTop(LineSize, &Button, &Card);
+			Ui()->DoScrollbarOption(&g_Config.m_TcRescueHookFov, &g_Config.m_TcRescueHookFov, &Button, "FOV", 30, 360, &CUi::ms_LinearScrollbarScale, CUi::SCROLLBAR_OPTION_NOCLAMPVALUE, " deg");
+			Card.HSplitTop(LineSize, &Button, &Card);
+			Ui()->DoScrollbarOption(&g_Config.m_TcRescueHookMargin, &g_Config.m_TcRescueHookMargin, &Button, "Kick in ticks", 1, 50, &CUi::ms_LinearScrollbarScale, CUi::SCROLLBAR_OPTION_NOCLAMPVALUE, " ticks");
+		}
+	}
+
+	// Hotkeys
+	{
+		CUIRect Card = BeginCard(&LeftCol, "Hotkeys", 2.0f * (LineSize + MarginExtraSmall));
+		static CButtonContainer s_ReaderButtonAntiVoid, s_ClearButtonAntiVoid;
+		DoLine_KeyReader(Card, s_ReaderButtonAntiVoid, s_ClearButtonAntiVoid, "Toggle avoid", "tc_anti_void_toggle");
+		static CButtonContainer s_ReaderButtonRocket, s_ClearButtonRocket;
+		DoLine_KeyReader(Card, s_ReaderButtonRocket, s_ClearButtonRocket, "Toggle rocket", "toggle tc_anti_void_rocket 0 1");
+	}
+
+	// ----- right column -----
+
+	// Tiles: which tile types count as the void
+	{
+		CUIRect Card = BeginCard(&RightCol, "Tiles", (7.0f + (g_Config.m_TcAvoidUnfreeze ? 2.0f : 1.0f)) * LineSize);
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoidTele, "Teles", &g_Config.m_TcAntiVoidTele, &Card, LineSize);
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoidDeath, "Death", &g_Config.m_TcAntiVoidDeath, &Card, LineSize);
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoidFreeze, "Freeze", &g_Config.m_TcAntiVoidFreeze, &Card, LineSize);
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoidDeepFreeze, "Deep freeze", &g_Config.m_TcAntiVoidDeepFreeze, &Card, LineSize);
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoidLiveFreeze, "Live freeze", &g_Config.m_TcAntiVoidLiveFreeze, &Card, LineSize);
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAvoidThreadFreeze, "Thread freeze (only release the hook for a real void, not mere freeze)", &g_Config.m_TcAvoidThreadFreeze, &Card, LineSize);
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAvoidUnfreeze, "Freeze is recoverable (only a slide into the void kills)", &g_Config.m_TcAvoidUnfreeze, &Card, LineSize);
+		Card.HSplitTop(LineSize, &Button, &Card);
+		Ui()->DoScrollbarOption(&g_Config.m_TcAvoidFreezeMargin, &g_Config.m_TcAvoidFreezeMargin, &Button, "Freeze slack", 0, 14, &CUi::ms_LinearScrollbarScale, CUi::SCROLLBAR_OPTION_NOCLAMPVALUE, " px");
+		if(g_Config.m_TcAvoidUnfreeze)
+		{
+			Card.HSplitTop(LineSize, &Button, &Card);
+			Ui()->DoScrollbarOption(&g_Config.m_TcAvoidUnfreezeTicks, &g_Config.m_TcAvoidUnfreezeTicks, &Button, "Slide follow", 20, 400, &CUi::ms_LinearScrollbarScale, CUi::SCROLLBAR_OPTION_NOCLAMPVALUE, " ticks");
+		}
+	}
+
+	// Rocket counter: a SEPARATE feature, works even when the braking avoid is off
+	{
+		CUIRect Card = BeginCard(&RightCol, "Rocket", (g_Config.m_TcAntiVoidRocket ? 4.0f : 1.0f) * LineSize);
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoidRocket, "Counter the void with a rocket", &g_Config.m_TcAntiVoidRocket, &Card, LineSize);
+		if(g_Config.m_TcAntiVoidRocket)
 		{
 			// Stored in tenths of a pixel so it can go as low as 0.1px for very tight timing.
-			Column.HSplitTop(LineSize, &Button, &Column);
+			Card.HSplitTop(LineSize, &Button, &Card);
 			CUIRect SliderLabel, ScrollBar;
 			Button.VSplitMid(&SliderLabel, &ScrollBar, minimum(10.0f, Button.w * 0.05f));
 			char aBuf[128];
-			str_format(aBuf, sizeof(aBuf), "Дистанция выстрела (тайминг): %.1f px", g_Config.m_TcAntiVoidRocketDistance / 10.0f);
+			str_format(aBuf, sizeof(aBuf), "Fire distance (timing): %.1f px", g_Config.m_TcAntiVoidRocketDistance / 10.0f);
 			const float SliderFontSize = SliderLabel.h * CUi::ms_FontmodHeight * 0.8f;
 			Ui()->DoLabel(&SliderLabel, aBuf, SliderFontSize, TEXTALIGN_ML);
 			int Value = std::clamp(g_Config.m_TcAntiVoidRocketDistance, 1, 3200);
 			Value = CUi::ms_LinearScrollbarScale.ToAbsolute(Ui()->DoScrollbarH(&g_Config.m_TcAntiVoidRocketDistance, &ScrollBar, CUi::ms_LinearScrollbarScale.ToRelative(Value, 1, 3200)), 1, 3200);
 			g_Config.m_TcAntiVoidRocketDistance = Value;
+			Card.HSplitTop(LineSize, &Button, &Card);
+			Ui()->DoScrollbarOption(&g_Config.m_TcAntiVoidRocketCooldown, &g_Config.m_TcAntiVoidRocketCooldown, &Button, "Cooldown", 1, 100, &CUi::ms_LinearScrollbarScale, CUi::SCROLLBAR_OPTION_NOCLAMPVALUE, " ticks");
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoidRocketAimVoid, "Aim at the nearest void (not along inertia)", &g_Config.m_TcAntiVoidRocketAimVoid, &Card, LineSize);
 		}
-		Column.HSplitTop(LineSize, &Button, &Column);
-		Ui()->DoScrollbarOption(&g_Config.m_TcAntiVoidRocketCooldown, &g_Config.m_TcAntiVoidRocketCooldown, &Button, "Перезарядка между ракетами", 1, 100, &CUi::ms_LinearScrollbarScale, CUi::SCROLLBAR_OPTION_NOCLAMPVALUE, " тиков");
-
-		Section("Прицеливание ракеты", "Куда стрелять: в ближайший войд по ходу движения (вкл) или строго по вектору скорости (выкл).");
-		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoidRocketAimVoid, "Целить в ближайший войд (а не по инерции)", &g_Config.m_TcAntiVoidRocketAimVoid, &Column, LineSize);
-
-		Section("Бинд ракеты", "Клавиша для быстрого вкл/выкл ракетного контр-войда.");
-		static CButtonContainer s_ReaderButtonRocket, s_ClearButtonRocket;
-		DoLine_KeyReader(Column, s_ReaderButtonRocket, s_ClearButtonRocket, "Клавиша вкл/выкл ракеты", "toggle tc_anti_void_rocket 0 1");
 	}
 
-	MyForkEndColumn(&s_ScrollRegion, Column);
+	// Visuals
+	{
+		CUIRect Card = BeginCard(&RightCol, "Visuals", 2.0f * LineSize);
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoidShow, "Show overlay (danger tiles + points)", &g_Config.m_TcAntiVoidShow, &Card, LineSize);
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoidDebug, "Log braking to console", &g_Config.m_TcAntiVoidDebug, &Card, LineSize);
+	}
+
+	// The scroll region needs the real content height: the bottom of the taller column.
+	CUIRect Bottom = LeftCol.y > RightCol.y ? LeftCol : RightCol;
+	Bottom.h = 0.0f;
+	s_ScrollRegion.AddRect(Bottom);
+	s_ScrollRegion.End();
 }
 
 void CMenus::RenderSettingsMyForkWeaponSpin(CUIRect MainView)
@@ -3296,21 +3385,21 @@ void CMenus::RenderSettingsMyForkWeaponSpin(CUIRect MainView)
 		}
 	};
 
-	Section("Крутилка оружия", "Косметика. Не влияет на ваш реальный прицел, крюк и стрельбу.");
-	DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcWeaponSpin, "Включить крутилку оружия", &g_Config.m_TcWeaponSpin, &Column, LineSize);
+	Section("Weapon Spin", "");
+	DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcWeaponSpin, "Enable weapon spin", &g_Config.m_TcWeaponSpin, &Column, LineSize);
 	if(g_Config.m_TcWeaponSpin)
 	{
 		// ***** Mode picker (one button per mode) ***** //
-		Section("Режим", "Как именно ведёт себя оружие.");
+		Section("Mode", "");
 		static const char *const s_apModeNames[CControls::NUM_WEAPON_SPIN_MODES] = {
-			"Вращение по часовой",
-			"Вращение против часовой",
-			"Маятник (качание у прицела)",
-			"Случайные рывки (в разные стороны)",
-			"Дрожание (мелкая тряска)",
-			"По 8 направлениям",
-			"Случайный дрейф (плавно)",
-			"Хаос (рывки + вращение)"};
+			"Spin clockwise",
+			"Spin counter-clockwise",
+			"Pendulum (swing around aim)",
+			"Random flicks",
+			"Jitter (small shake)",
+			"Snap 8-directions",
+			"Random drift (smooth)",
+			"Chaos (flicks + spin)"};
 		static CButtonContainer s_aModeButtons[CControls::NUM_WEAPON_SPIN_MODES];
 		for(int i = 0; i < CControls::NUM_WEAPON_SPIN_MODES; ++i)
 		{
@@ -3321,30 +3410,23 @@ void CMenus::RenderSettingsMyForkWeaponSpin(CUIRect MainView)
 		}
 
 		// ***** Parameters ***** //
-		Section("Параметры", "Скорость управляет скоростью вращения, для рывков — их частотой.");
+		Section("Parameters", "");
 		Column.HSplitTop(LineSize, &Button, &Column);
-		Ui()->DoScrollbarOption(&g_Config.m_TcWeaponSpinSpeed, &g_Config.m_TcWeaponSpinSpeed, &Button, "Скорость / частота", 0, 500, &CUi::ms_LinearScrollbarScale, CUi::SCROLLBAR_OPTION_NOCLAMPVALUE);
+		Ui()->DoScrollbarOption(&g_Config.m_TcWeaponSpinSpeed, &g_Config.m_TcWeaponSpinSpeed, &Button, "Speed / rate", 0, 500, &CUi::ms_LinearScrollbarScale, CUi::SCROLLBAR_OPTION_NOCLAMPVALUE);
 		Column.HSplitTop(LineSize, &Button, &Column);
-		Ui()->DoScrollbarOption(&g_Config.m_TcWeaponSpinRandom, &g_Config.m_TcWeaponSpinRandom, &Button, "Хаотичность (поверх режима)", 0, 100, &CUi::ms_LinearScrollbarScale, 0, "%");
+		Ui()->DoScrollbarOption(&g_Config.m_TcWeaponSpinRandom, &g_Config.m_TcWeaponSpinRandom, &Button, "Randomness (on top of mode)", 0, 100, &CUi::ms_LinearScrollbarScale, 0, "%");
 
 		// ***** Visibility ***** //
-		Section("Видимость", "Кому показывать вращение.");
-		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcWeaponSpinOthers, "Крутить и у других игроков (локально)", &g_Config.m_TcWeaponSpinOthers, &Column, LineSize);
-		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcWeaponSpinReal, "Реальный спин (видят другие игроки)", &g_Config.m_TcWeaponSpinReal, &Column, LineSize);
-		if(g_Config.m_TcWeaponSpinReal)
-		{
-			Column.HSplitTop(LineSize * 0.85f, &Label, &Column);
-			TextRender()->TextColor(0.9f, 0.78f, 0.35f, 1.0f);
-			Ui()->DoLabel(&Label, "Отправляет вращение на сервер. Прицел сохраняется на тиках хука/стрельбы.", FontSize * 0.8f, TEXTALIGN_ML);
-			TextRender()->TextColor(TextRender()->DefaultTextColor());
-		}
+		Section("Visibility", "");
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcWeaponSpinOthers, "Spin other players' weapons too (local)", &g_Config.m_TcWeaponSpinOthers, &Column, LineSize);
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcWeaponSpinReal, "Real spin (other players see it)", &g_Config.m_TcWeaponSpinReal, &Column, LineSize);
 
 		// ***** Binds ***** //
-		Section("Бинды", "Клавиши для быстрого управления.");
+		Section("Binds", "");
 		static CButtonContainer s_ReaderSpinToggle, s_ClearSpinToggle;
-		DoLine_KeyReader(Column, s_ReaderSpinToggle, s_ClearSpinToggle, "Вкл/выкл крутилку", "tc_weapon_spin_toggle");
+		DoLine_KeyReader(Column, s_ReaderSpinToggle, s_ClearSpinToggle, "Toggle weapon spin", "tc_weapon_spin_toggle");
 		static CButtonContainer s_ReaderSpinMode, s_ClearSpinMode;
-		DoLine_KeyReader(Column, s_ReaderSpinMode, s_ClearSpinMode, "Следующий режим", "tc_weapon_spin_mode_next");
+		DoLine_KeyReader(Column, s_ReaderSpinMode, s_ClearSpinMode, "Next mode", "tc_weapon_spin_mode_next");
 	}
 
 	MyForkEndColumn(&s_ScrollRegion, Column);
@@ -3512,7 +3594,7 @@ void CMenus::RenderProxyForm(CUIRect View, CProxyEntry *pEntry)
 	};
 
 	View.HSplitTop(RowH, &Label, &View);
-	Ui()->DoLabel(&Label, m_ProxyEditing == -2 ? "Новый прокси" : "Редактирование прокси", FontSize + 4.0f, TEXTALIGN_ML);
+	Ui()->DoLabel(&Label, m_ProxyEditing == -2 ? "New proxy" : "Edit proxy", FontSize + 4.0f, TEXTALIGN_ML);
 	View.HSplitTop(MarginSmall, nullptr, &View);
 
 	// Protocol selector.
@@ -3527,15 +3609,15 @@ void CMenus::RenderProxyForm(CUIRect View, CProxyEntry *pEntry)
 		pEntry->m_Type = NET_PROXY_TYPE_SHADOWSOCKS;
 
 	static CLineInput s_NameInput;
-	Field_(&s_NameInput, "Название", "необязательно", pEntry->m_aName, sizeof(pEntry->m_aName), false);
+	Field_(&s_NameInput, "Name", "optional", pEntry->m_aName, sizeof(pEntry->m_aName), false);
 	static CLineInput s_HostInput;
-	Field_(&s_HostInput, "Хост / IP", "127.0.0.1", pEntry->m_aHost, sizeof(pEntry->m_aHost), false);
+	Field_(&s_HostInput, "Host / IP", "127.0.0.1", pEntry->m_aHost, sizeof(pEntry->m_aHost), false);
 
 	static CLineInput s_PortInput;
 	static char s_aPort[8] = "";
 	if(!s_PortInput.IsActive())
 		str_format(s_aPort, sizeof(s_aPort), "%d", pEntry->m_Port);
-	Field_(&s_PortInput, "Порт", "1080", s_aPort, sizeof(s_aPort), false);
+	Field_(&s_PortInput, "Port", "1080", s_aPort, sizeof(s_aPort), false);
 	{
 		const int Port = str_toint(s_aPort);
 		if(Port >= 1 && Port <= 65535)
@@ -3545,15 +3627,15 @@ void CMenus::RenderProxyForm(CUIRect View, CProxyEntry *pEntry)
 	if(!IsShadowsocks)
 	{
 		static CLineInput s_UserInput;
-		Field_(&s_UserInput, "Логин", "необязательно", pEntry->m_aUser, sizeof(pEntry->m_aUser), false);
+		Field_(&s_UserInput, "Username", "optional", pEntry->m_aUser, sizeof(pEntry->m_aUser), false);
 	}
 	static CLineInput s_PassInput;
-	Field_(&s_PassInput, "Пароль", IsShadowsocks ? "пароль SS" : "необязательно", pEntry->m_aPass, sizeof(pEntry->m_aPass), true);
+	Field_(&s_PassInput, "Password", IsShadowsocks ? "SS password" : "optional", pEntry->m_aPass, sizeof(pEntry->m_aPass), true);
 
 	if(IsShadowsocks)
 	{
 		View.HSplitTop(RowH * 0.8f, &Label, &View);
-		Ui()->DoLabel(&Label, "Шифр:", FontSize, TEXTALIGN_ML);
+		Ui()->DoLabel(&Label, "Cipher:", FontSize, TEXTALIGN_ML);
 		static const char *const s_apMethods[] = {"chacha20-ietf-poly1305", "aes-256-gcm", "aes-128-gcm"};
 		static CButtonContainer s_aMethodButtons[3];
 		for(int i = 0; i < 3; ++i)
@@ -3571,9 +3653,9 @@ void CMenus::RenderProxyForm(CUIRect View, CProxyEntry *pEntry)
 	CUIRect SaveBtn, CancelBtn;
 	Row.VSplitMid(&CancelBtn, &SaveBtn, Margin);
 	static CButtonContainer s_CancelButton, s_SaveButton;
-	if(DoButton_Menu(&s_CancelButton, "Отмена", 0, &CancelBtn))
+	if(DoButton_Menu(&s_CancelButton, "Cancel", 0, &CancelBtn))
 		m_ProxyEditing = -1;
-	if(DoButton_Menu(&s_SaveButton, "Сохранить", 0, &SaveBtn) && pEntry->m_aHost[0])
+	if(DoButton_Menu(&s_SaveButton, "Save", 0, &SaveBtn) && pEntry->m_aHost[0])
 	{
 		int SavedIndex;
 		if(m_ProxyEditing == -2)
@@ -3622,16 +3704,16 @@ void CMenus::RenderProxyManager(CUIRect View)
 	AddBtn = Row;
 
 	static CButtonContainer s_EnableButton, s_ApplyButton, s_PingButton, s_AddButton;
-	if(DoButton_Menu(&s_EnableButton, g_Config.m_TcSocks5 ? "Прокси: ВКЛ" : "Прокси: ВЫКЛ", g_Config.m_TcSocks5, &EnableBtn))
+	if(DoButton_Menu(&s_EnableButton, g_Config.m_TcSocks5 ? "Proxy: ON" : "Proxy: OFF", g_Config.m_TcSocks5, &EnableBtn))
 	{
 		g_Config.m_TcSocks5 = !g_Config.m_TcSocks5;
 		Console()->ExecuteLine("net_reset", IConsole::CLIENT_ID_UNSPECIFIED);
 	}
-	if(DoButton_Menu(&s_ApplyButton, "Применить", 0, &ApplyBtn))
+	if(DoButton_Menu(&s_ApplyButton, "Apply", 0, &ApplyBtn))
 		Console()->ExecuteLine("net_reset", IConsole::CLIENT_ID_UNSPECIFIED);
-	if(DoButton_Menu(&s_PingButton, "Пинг", 0, &PingBtn))
+	if(DoButton_Menu(&s_PingButton, "Ping", 0, &PingBtn))
 		StartProxyPing();
-	if(DoButton_Menu(&s_AddButton, "+ Добавить", 0, &AddBtn))
+	if(DoButton_Menu(&s_AddButton, "+ Add", 0, &AddBtn))
 	{
 		m_EditProxy = CProxyEntry();
 		m_EditProxy.m_Type = g_Config.m_TcSocks5Type;
@@ -3647,17 +3729,17 @@ void CMenus::RenderProxyManager(CUIRect View)
 	ColorRGBA StatusColor;
 	if(!g_Config.m_TcSocks5)
 	{
-		pStatusText = "Статус: выключен";
+		pStatusText = "Status: off";
 		StatusColor = ColorRGBA(0.6f, 0.6f, 0.6f, 1.0f);
 	}
 	else if(Status == NET_PROXY_ACTIVE)
 	{
-		pStatusText = "Статус: активен";
+		pStatusText = "Status: active";
 		StatusColor = ColorRGBA(0.4f, 0.85f, 0.4f, 1.0f);
 	}
 	else
 	{
-		pStatusText = "Статус: не подключён — проверь данные и поддержку UDP у прокси";
+		pStatusText = "Status: not connected — check the details and the proxy's UDP support";
 		StatusColor = ColorRGBA(0.9f, 0.45f, 0.4f, 1.0f);
 	}
 	TextRender()->TextColor(StatusColor);
@@ -3670,7 +3752,7 @@ void CMenus::RenderProxyManager(CUIRect View)
 	{
 		View.HSplitTop(RowH, &Row, &View);
 		TextRender()->TextColor(0.6f, 0.6f, 0.6f, 1.0f);
-		Ui()->DoLabel(&Row, "Список пуст — нажми «+ Добавить», чтобы создать прокси.", FontSize, TEXTALIGN_ML);
+		Ui()->DoLabel(&Row, "List is empty — press \"+ Add\" to create a proxy.", FontSize, TEXTALIGN_ML);
 		TextRender()->TextColor(TextRender()->DefaultTextColor());
 		return;
 	}
@@ -3731,7 +3813,7 @@ void CMenus::RenderProxyManager(CUIRect View)
 		Ui()->DoLabel(&Ping, aPing, FontSize * 0.9f, TEXTALIGN_MC);
 		TextRender()->TextColor(TextRender()->DefaultTextColor());
 
-		if(DoButton_Menu(&s_aEditButtons[i], "ред", 0, &Edit))
+		if(DoButton_Menu(&s_aEditButtons[i], "edit", 0, &Edit))
 		{
 			m_EditProxy = Entry;
 			m_ProxyEditing = (int)i;

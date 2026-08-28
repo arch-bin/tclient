@@ -1533,7 +1533,7 @@ void CPlayers::OnRender()
 
 			Frozen = GameClient()->m_aClients[i].m_Predicted.m_FreezeEnd != 0;
 			// TClient
-			if(g_Config.m_TcFastInput)
+			if(CGameClient::FastInputEnabled())
 				Frozen = GameClient()->m_aClients[i].m_RegularPredicted.m_FreezeEnd != 0;
 		}
 		else

@@ -751,6 +751,7 @@ if(TARGET_OS STREQUAL "windows")
   list(APPEND PLATFORM_LIBS version.lib) # GetFileVersionInfoSizeW
   list(APPEND PLATFORM_LIBS ws2_32.lib) # Windows sockets
   list(APPEND PLATFORM_LIBS advapi32.lib) # Reg* and Crypt* functions
+  list(APPEND PLATFORM_LIBS crypt32.lib) # Cert* functions, used by the bundled OpenSSL crypto
   list(APPEND PLATFORM_LIBS bcrypt.lib userenv.lib) # for Rust (https://github.com/rust-lang/rust/issues/91974)
   list(APPEND PLATFORM_LIBS ole32.lib) # CoInitialize(Ex)
   list(APPEND PLATFORM_LIBS shell32.lib)
@@ -2334,6 +2335,8 @@ set_src(GAME_SHARED GLOB src/game
   alloc.h
   collision.cpp
   collision.h
+  freeze_wall.cpp
+  freeze_wall.h
   gamecore.cpp
   gamecore.h
   layers.cpp

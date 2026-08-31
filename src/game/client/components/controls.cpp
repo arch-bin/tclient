@@ -63,9 +63,13 @@ void CControls::OnPlayerDeath()
 	AvoidReportOutcome("YOU DIED");
 	for(int &AmmoCount : m_aAmmoCount)
 		AmmoCount = 0;
-	// Drop any pending rocket-save weapon restore so we don't switch weapons right after respawning.
+	// Drop any pending rocket-save / laser-save weapon restore so we don't switch weapons right after respawning.
 	for(int &PrevWeapon : m_aAntiVoidRocketPrevWeapon)
 		PrevWeapon = -1;
+	for(int &PrevWeapon : m_aAntiVoidLaserPrevWeapon)
+		PrevWeapon = -1;
+	for(bool &Pending : m_aAntiVoidLaserReleasePending)
+		Pending = false;
 	// A rescue hook that was mid-save when we died must not keep hooking after respawn: drop the
 	// latch AND release the forced m_Hook, which would otherwise stick in m_aInputData forever
 	// (only real key events rewrite it).
@@ -303,7 +307,7 @@ int CControls::SnapInput(int *pData)
 		// TClient: keep the automatic safety features (anti-void, balancer, rocket counter) alive even while
 		// chat or a menu is open. First rebuild the movement direction from the held keys, so a brake set on a
 		// previous tick is released once the danger is gone instead of sticking, then let the features steer.
-		if(g_Config.m_TcAntiVoid || g_Config.m_TcBalancer || g_Config.m_TcAntiVoidRocket)
+		if(g_Config.m_TcAntiVoid || g_Config.m_TcBalancer || g_Config.m_TcAntiVoidRocket || g_Config.m_TcAntiVoidLaser)
 		{
 			m_aInputData[g_Config.m_ClDummy].m_Direction = 0;
 			if(m_aInputDirectionLeft[g_Config.m_ClDummy] && !m_aInputDirectionRight[g_Config.m_ClDummy])
@@ -599,6 +603,8 @@ void CControls::ApplyAutoSafety()
 	const bool Frozen = LocalId >= 0 && GameClient()->m_aClients[LocalId].m_Predicted.m_FreezeEnd != 0;
 	if(g_Config.m_TcAntiVoidDebug && Frozen && !m_aAvoidWasFrozen[g_Config.m_ClDummy])
 		AvoidReportOutcome("YOU GOT FROZEN");
+	if(g_Config.m_TcAntiVoidDebug && !Frozen && m_aAvoidWasFrozen[g_Config.m_ClDummy])
+		log_info("laser_ricochet", "==>> YOU GOT UNFROZEN! (pos=%.0f,%.0f tick=%d)", GameClient()->m_PredictedChar.m_Pos.x, GameClient()->m_PredictedChar.m_Pos.y, Client()->PredGameTick(g_Config.m_ClDummy));
 	m_aAvoidWasFrozen[g_Config.m_ClDummy] = Frozen;
 
 	// STAND DOWN WHILE FROZEN. The server throws your whole input away until you thaw, so every override
@@ -633,6 +639,10 @@ void CControls::ApplyAutoSafety()
 	// fire bit stuck "held" and permanently break the counter once the balancer engaged right after a shot.
 	if(g_Config.m_TcAntiVoidRocket)
 		ApplyAntiVoidRocket(g_Config.m_TcBalancerDisableRocket && BalancerActive);
+
+	// Laser self-ricochet counter: auto-fires laser into nearest wall to bounce back into ourselves on danger.
+	if(g_Config.m_TcAntiVoidLaser)
+		ApplyAntiVoidLaser(g_Config.m_TcBalancerDisableRocket && BalancerActive);
 
 	// Hole assist runs last so that, while you deliberately engage it, it wins the horizontal direction
 	// over anti-void braking (which might otherwise steer you away from the very gap you are aiming at).
@@ -1782,6 +1792,543 @@ void CControls::ApplyAntiVoidRocket(bool Suppressed)
 		m_aInputData[Dummy].m_WantedWeapon = Prev + 1;
 		if(GameClient()->m_PredictedChar.m_ActiveWeapon == Prev)
 			m_aAntiVoidRocketPrevWeapon[Dummy] = -1; // restored
+	}
+}
+
+// TClient laser self-ricochet: find the nearest wall to shoot at so the laser bounces back into our target position in safe air.
+bool CControls::FindLaserSelfBounce(vec2 TargetPos1, bool Valid1, vec2 TargetPos2, bool Valid2, vec2 &OutAimDir, float &OutDistToWall, vec2 &OutBouncePos, vec2 &OutReflDir, float &OutTeeHitOffset, int &OutBounces, int &OutArrivalTicks, int BounceDelayTicks) const
+{
+	const vec2 CharPos = LocalCharPos();
+	const float R = 28.0f; // Tee radius
+
+	const int TuneZone = Collision()->IsTune(Collision()->GetMapIndex(CharPos));
+	const CTuningParams *pTuning = GameClient()->GetTuning(TuneZone);
+	const float LaserReach = pTuning ? (float)pTuning->m_LaserReach : 800.0f;
+	const float LaserBounceCost = pTuning ? (float)pTuning->m_LaserBounceCost : 0.0f;
+	const int LaserBounceNum = pTuning ? (int)pTuning->m_LaserBounceNum : 1000;
+
+	struct CLaserCandidate
+	{
+		float m_Angle; // radians
+		vec2 m_AimDir;
+		float m_DistToWall;
+		vec2 m_BouncePos;
+		vec2 m_ReflDir;
+		float m_TeeHitOffset;
+		int m_Bounces;
+		int m_ArrivalTicks;
+		vec2 m_TargetPos;
+	};
+
+	std::vector<CLaserCandidate> vCandidates;
+	const int NumRays = 720; // 0.5 degree angular resolution
+	for(int i = 0; i < NumRays; ++i)
+	{
+		const float Angle = (float)i / (float)NumRays * 2.0f * pi;
+		const vec2 Dir0 = vec2(cos(Angle), sin(Angle));
+
+		// Ray 1: CharPos -> CharPos + Dir0 * LaserReach
+		vec2 From0 = CharPos;
+		vec2 To0 = CharPos + Dir0 * LaserReach;
+		vec2 Coltile0;
+		int TeleNr0 = 0;
+		int Res0 = Collision()->IntersectLineTeleWeapon(From0, To0, &Coltile0, &To0, &TeleNr0);
+		if(!Res0)
+			continue;
+
+		// Calculate reflection at wall
+		vec2 BounceHitPos0 = To0;
+		vec2 TempPos = BounceHitPos0;
+		vec2 TempDir = Dir0 * 4.0f;
+		int DoorTile0 = 0;
+		if(Res0 == -1)
+		{
+			DoorTile0 = Collision()->GetTile(round_to_int(Coltile0.x), round_to_int(Coltile0.y));
+			Collision()->SetCollisionAt(round_to_int(Coltile0.x), round_to_int(Coltile0.y), TILE_SOLID);
+		}
+		Collision()->MovePoint(&TempPos, &TempDir, 1.0f, nullptr);
+		if(Res0 == -1)
+			Collision()->SetCollisionAt(round_to_int(Coltile0.x), round_to_int(Coltile0.y), DoorTile0);
+
+		if(length_squared(TempDir) < 0.001f)
+			continue;
+
+		vec2 Dir1 = normalize(TempDir);
+		float Dist0 = distance(From0, BounceHitPos0);
+		float Energy1 = LaserReach - Dist0 - LaserBounceCost;
+		if(Energy1 <= 0.0f)
+			continue;
+
+		// Ray 2: BounceHitPos0 -> BounceHitPos0 + Dir1 * Energy1
+		vec2 From1 = BounceHitPos0;
+		vec2 To1 = From1 + Dir1 * Energy1;
+		vec2 Coltile1;
+		int TeleNr1 = 0;
+		int Res1 = Collision()->IntersectLineTeleWeapon(From1, To1, &Coltile1, &To1, &TeleNr1);
+
+		// Check 1-bounce target position if valid
+		if(Valid1)
+		{
+			vec2 ClosestPt;
+			if(closest_point_on_line(From1, To1, TargetPos1, ClosestPt))
+			{
+				float Offset = distance(TargetPos1, ClosestPt);
+				if(Offset < R)
+				{
+					vCandidates.push_back({Angle, Dir0, Dist0, BounceHitPos0, Dir1, Offset, 1, BounceDelayTicks, TargetPos1});
+					continue;
+				}
+			}
+		}
+
+		// 2-bounce check if enabled and Valid2 is true
+		if(Valid2 && g_Config.m_TcAntiVoidLaserMaxBounces >= 2 && LaserBounceNum >= 2 && Res1 != 0)
+		{
+			vec2 BounceHitPos1 = To1;
+			vec2 TempPos2 = BounceHitPos1;
+			vec2 TempDir2 = Dir1 * 4.0f;
+			int DoorTile1 = 0;
+			if(Res1 == -1)
+			{
+				DoorTile1 = Collision()->GetTile(round_to_int(Coltile1.x), round_to_int(Coltile1.y));
+				Collision()->SetCollisionAt(round_to_int(Coltile1.x), round_to_int(Coltile1.y), TILE_SOLID);
+			}
+			Collision()->MovePoint(&TempPos2, &TempDir2, 1.0f, nullptr);
+			if(Res1 == -1)
+				Collision()->SetCollisionAt(round_to_int(Coltile1.x), round_to_int(Coltile1.y), DoorTile1);
+
+			if(length_squared(TempDir2) >= 0.001f)
+			{
+				vec2 Dir2 = normalize(TempDir2);
+				float Dist1 = distance(From1, BounceHitPos1);
+				float Energy2 = Energy1 - Dist1 - LaserBounceCost;
+				if(Energy2 > 0.0f)
+				{
+					vec2 From2 = BounceHitPos1;
+					vec2 To2 = From2 + Dir2 * Energy2;
+					vec2 Coltile2;
+					int TeleNr2 = 0;
+					Collision()->IntersectLineTeleWeapon(From2, To2, &Coltile2, &To2, &TeleNr2);
+
+					vec2 ClosestPt2;
+					if(closest_point_on_line(From2, To2, TargetPos2, ClosestPt2))
+					{
+						float Offset2 = distance(TargetPos2, ClosestPt2);
+						if(Offset2 < R)
+						{
+							vCandidates.push_back({Angle, Dir0, Dist0, BounceHitPos0, Dir2, Offset2, 2, BounceDelayTicks * 2, TargetPos2});
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if(vCandidates.empty())
+	{
+		if(g_Config.m_TcAntiVoidLaserDebug >= 2)
+			log_info("laser_ricochet", "scan %d rays: no bounce path reaches safe-air targets (Valid1=%d, Valid2=%d)", NumRays, Valid1, Valid2);
+		return false;
+	}
+
+	// Select best candidate: prefer 1-bounce, then smallest offset to target tee center (most accurate hit), then distance
+	std::sort(vCandidates.begin(), vCandidates.end(), [](const CLaserCandidate &a, const CLaserCandidate &b) {
+		if(a.m_Bounces != b.m_Bounces)
+			return a.m_Bounces < b.m_Bounces;
+		if(std::abs(a.m_TeeHitOffset - b.m_TeeHitOffset) > 1.0f)
+			return a.m_TeeHitOffset < b.m_TeeHitOffset;
+		return a.m_DistToWall < b.m_DistToWall;
+	});
+
+	CLaserCandidate Best = vCandidates[0];
+
+	// Sub-degree refinement (±0.5° with 0.025° steps) to hit target dead-center
+	if(Best.m_Bounces == 1)
+	{
+		const float DegToRad = pi / 180.0f;
+		float BestFineOffset = Best.m_TeeHitOffset;
+		vec2 BestFineDir = Best.m_AimDir;
+		vec2 BestFineBounce = Best.m_BouncePos;
+		vec2 BestFineRefl = Best.m_ReflDir;
+		float BestFineDist = Best.m_DistToWall;
+
+		for(int step = -20; step <= 20; ++step)
+		{
+			const float FineAngle = Best.m_Angle + (float)step * 0.025f * DegToRad;
+			const vec2 FineDir0 = vec2(cos(FineAngle), sin(FineAngle));
+			vec2 To0 = CharPos + FineDir0 * LaserReach;
+			vec2 Coltile0;
+			int TeleNr0 = 0;
+			int Res0 = Collision()->IntersectLineTeleWeapon(CharPos, To0, &Coltile0, &To0, &TeleNr0);
+			if(!Res0) continue;
+
+			vec2 BounceHitPos0 = To0;
+			vec2 TempPos = BounceHitPos0;
+			vec2 TempDir = FineDir0 * 4.0f;
+			int DoorTile0 = 0;
+			if(Res0 == -1)
+			{
+				DoorTile0 = Collision()->GetTile(round_to_int(Coltile0.x), round_to_int(Coltile0.y));
+				Collision()->SetCollisionAt(round_to_int(Coltile0.x), round_to_int(Coltile0.y), TILE_SOLID);
+			}
+			Collision()->MovePoint(&TempPos, &TempDir, 1.0f, nullptr);
+			if(Res0 == -1)
+				Collision()->SetCollisionAt(round_to_int(Coltile0.x), round_to_int(Coltile0.y), DoorTile0);
+
+			if(length_squared(TempDir) < 0.001f) continue;
+			vec2 Dir1 = normalize(TempDir);
+			float Dist0 = distance(CharPos, BounceHitPos0);
+			float Energy1 = LaserReach - Dist0 - LaserBounceCost;
+			if(Energy1 <= 0.0f) continue;
+
+			vec2 To1 = BounceHitPos0 + Dir1 * Energy1;
+			vec2 Coltile1;
+			int TeleNr1 = 0;
+			Collision()->IntersectLineTeleWeapon(BounceHitPos0, To1, &Coltile1, &To1, &TeleNr1);
+
+			vec2 ClosestPt;
+			if(closest_point_on_line(BounceHitPos0, To1, Best.m_TargetPos, ClosestPt))
+			{
+				float Offset = distance(Best.m_TargetPos, ClosestPt);
+				if(Offset < BestFineOffset)
+				{
+					BestFineOffset = Offset;
+					BestFineDir = FineDir0;
+					BestFineBounce = BounceHitPos0;
+					BestFineRefl = Dir1;
+					BestFineDist = Dist0;
+				}
+			}
+		}
+		Best.m_AimDir = BestFineDir;
+		Best.m_BouncePos = BestFineBounce;
+		Best.m_ReflDir = BestFineRefl;
+		Best.m_DistToWall = BestFineDist;
+		Best.m_TeeHitOffset = BestFineOffset;
+	}
+
+	OutAimDir = Best.m_AimDir;
+	OutDistToWall = Best.m_DistToWall;
+	OutBouncePos = Best.m_BouncePos;
+	OutReflDir = Best.m_ReflDir;
+	OutTeeHitOffset = Best.m_TeeHitOffset;
+	OutBounces = Best.m_Bounces;
+	OutArrivalTicks = Best.m_ArrivalTicks;
+
+	if(g_Config.m_TcAntiVoidLaserDebug >= 1)
+	{
+		const float AngleDeg = std::atan2(Best.m_AimDir.y, Best.m_AimDir.x) * 180.0f / pi;
+		log_info("laser_ricochet", "found %d candidates | best: wall=(%.0f, %.0f) dist=%.1fpx angle=%.1f° -> target_pos=(%.0f, %.0f) in %d ticks, hit_offset=%.2fpx",
+			(int)vCandidates.size(), Best.m_BouncePos.x, Best.m_BouncePos.y, Best.m_DistToWall, AngleDeg, Best.m_TargetPos.x, Best.m_TargetPos.y, Best.m_ArrivalTicks, Best.m_TeeHitOffset);
+	}
+	return true;
+}
+
+// Laser self-ricochet counter: fires laser at the nearest wall so it ricochets back into the player as they emerge from freeze.
+void CControls::ApplyAntiVoidLaser(bool Suppressed)
+{
+	const int Dummy = g_Config.m_ClDummy;
+	const vec2 CharPos = LocalCharPos();
+	const int CurrentTick = Client()->PredGameTick(Dummy);
+
+	// First, release the fire press we made on the previous tick.
+	if(m_aAntiVoidLaserReleasePending[Dummy])
+	{
+		m_aAntiVoidLaserReleasePending[Dummy] = false;
+		if((m_aInputData[Dummy].m_Fire & 1) != 0 && m_aInputData[Dummy].m_Fire == m_aAntiVoidLaserFireValue[Dummy])
+		{
+			m_aInputData[Dummy].m_Fire++;
+			if(g_Config.m_TcAntiVoidLaserDebug >= 2)
+				log_info("laser_ricochet", "fire released on tick %d", CurrentTick);
+		}
+	}
+
+	if(m_aAntiVoidLaserCooldown[Dummy] > 0)
+		m_aAntiVoidLaserCooldown[Dummy]--;
+
+	// In-flight rescue laser tracking and verification
+	if(m_aLaserTracker[Dummy].m_Active)
+	{
+		if(CurrentTick >= m_aLaserTracker[Dummy].m_ArrivalTick)
+		{
+			const vec2 RealPos = LocalCharPos();
+			const vec2 RayStart = m_aLaserTracker[Dummy].m_WallPos;
+			const vec2 RayEnd = RayStart + m_aLaserTracker[Dummy].m_ReflDir * 800.0f;
+			vec2 ClosestOnRay(0.0f, 0.0f);
+			closest_point_on_line(RayStart, RayEnd, RealPos, ClosestOnRay);
+			const float RealRayDist = distance(RealPos, ClosestOnRay);
+			const float PredDrift = distance(RealPos, m_aLaserTracker[Dummy].m_TargetPos);
+			const bool Hit = (RealRayDist < 28.0f);
+			const int LocalId = GameClient()->m_Snap.m_LocalClientId;
+			const bool FrozenNow = (LocalId >= 0 && GameClient()->m_aClients[LocalId].m_Predicted.m_FreezeEnd != 0);
+
+			log_info("laser_ricochet", "==>> ARRIVAL TICK %d: real_pos=(%.1f, %.1f) pred_pos=(%.1f, %.1f) drift=%.1fpx | ray_dist=%.2fpx (%s, R=28px) | frozen=%d",
+				CurrentTick, RealPos.x, RealPos.y, m_aLaserTracker[Dummy].m_TargetPos.x, m_aLaserTracker[Dummy].m_TargetPos.y, PredDrift,
+				RealRayDist, Hit ? "HIT" : "MISS", FrozenNow ? 1 : 0);
+
+			if(!Hit)
+			{
+				log_info("laser_ricochet", "     MISS DETAILS: ray passed at (%.1f, %.1f), player is at (%.1f, %.1f) (drift=%.1fpx)",
+					ClosestOnRay.x, ClosestOnRay.y, RealPos.x, RealPos.y, PredDrift);
+			}
+
+			m_aLaserTracker[Dummy].m_Active = false;
+		}
+		else if(CurrentTick > m_aLaserTracker[Dummy].m_ArrivalTick + 15)
+		{
+			m_aLaserTracker[Dummy].m_Active = false;
+		}
+	}
+
+	if(Suppressed)
+		return;
+
+	const bool HaveLaser = GameClient()->m_PredictedChar.m_aWeapons[WEAPON_LASER].m_Got &&
+		GameClient()->m_PredictedChar.m_aWeapons[WEAPON_LASER].m_Ammo != 0;
+
+	if(!HaveLaser)
+	{
+		if(m_aAntiVoidLaserPrevWeapon[Dummy] >= 0 && !m_aAntiVoidLaserReleasePending[Dummy])
+		{
+			const int Prev = m_aAntiVoidLaserPrevWeapon[Dummy];
+			if(GameClient()->m_PredictedChar.m_ActiveWeapon == WEAPON_LASER && Prev != WEAPON_LASER && Prev >= 0)
+				m_aInputData[Dummy].m_WantedWeapon = Prev + 1;
+			else
+				m_aAntiVoidLaserPrevWeapon[Dummy] = -1;
+		}
+		return;
+	}
+
+	// If player manually selected a weapon, never fight their choice
+	const int UserWanted = m_aInputData[Dummy].m_WantedWeapon;
+	if(UserWanted != 0 && UserWanted != WEAPON_LASER + 1)
+	{
+		m_aAntiVoidLaserPrevWeapon[Dummy] = -1;
+	}
+
+	// Get laser bounce delay to calculate ideal rescue timing
+	const int TuneZone = Collision()->IsTune(Collision()->GetMapIndex(CharPos));
+	const CTuningParams *pTuning = GameClient()->GetTuning(TuneZone);
+	const float LaserBounceDelay = pTuning ? (float)pTuning->m_LaserBounceDelay : 150.0f;
+	const int BounceDelayTicks = maximum(1, round_to_int(50.0f * LaserBounceDelay / 1000.0f));
+
+	// 1. Simulate trajectory forward up to 25 ticks to find when we touch freeze
+	CCharacterCore SimCore = GameClient()->m_PredictedChar;
+	SimCore.Init(nullptr, Collision());
+	SimCore.SetHookedPlayer(-1);
+
+	int EnterFreezeTick = -1;
+	bool InFreeze = (AvoidDangerClass(CharPos.x, CharPos.y) >= 1);
+	if(InFreeze)
+		EnterFreezeTick = 0;
+
+	const int MaxSimTicks = 25;
+	for(int t = 1; t <= MaxSimTicks; ++t)
+	{
+		if(InFreeze)
+		{
+			SimCore.m_Input.m_Direction = 0;
+			SimCore.m_Input.m_Hook = 0;
+			SimCore.m_Input.m_Jump = 0;
+		}
+		else
+		{
+			SimCore.m_Input = m_aInputData[Dummy];
+		}
+
+		vec2 Prev = SimCore.m_Pos;
+		SimCore.Tick(true);
+		SimCore.Move();
+		SimCore.Quantize();
+
+		const int Steps = maximum(1, (int)(distance(Prev, SimCore.m_Pos) / 4.0f));
+		for(int s = 1; s <= Steps; ++s)
+		{
+			vec2 Pt = mix(Prev, SimCore.m_Pos, (float)s / (float)Steps);
+			const int Danger = AvoidDangerClass(Pt.x, Pt.y);
+
+			if(!InFreeze && Danger >= 1)
+			{
+				InFreeze = true;
+				if(EnterFreezeTick < 0)
+					EnterFreezeTick = t;
+				break;
+			}
+		}
+		if(EnterFreezeTick >= 0)
+			break;
+	}
+
+	// 2. Strict Close-To-Freeze Triggering:
+	// Only fire when we are AT THE VERY EDGE of freeze (0 to 2 ticks away), never far in advance!
+	const bool ReadyToEdgeFire = (EnterFreezeTick >= 0 && EnterFreezeTick <= 2);
+
+	vec2 TargetPos1(0.0f, 0.0f);
+	vec2 TargetPos2(0.0f, 0.0f);
+	bool Valid1 = false;
+	bool Valid2 = false;
+
+	if(ReadyToEdgeFire)
+	{
+		// Simulate forward from the edge for 1-bounce (BounceDelayTicks)
+		CCharacterCore CheckCore1 = GameClient()->m_PredictedChar;
+		CheckCore1.Init(nullptr, Collision());
+		CheckCore1.SetHookedPlayer(-1);
+		bool PassedFreeze1 = (AvoidDangerClass(CharPos.x, CharPos.y) >= 1);
+
+		for(int t = 1; t <= BounceDelayTicks; ++t)
+		{
+			if(PassedFreeze1 || (EnterFreezeTick >= 0 && t >= EnterFreezeTick))
+			{
+				CheckCore1.m_Input.m_Direction = 0;
+				CheckCore1.m_Input.m_Hook = 0;
+				CheckCore1.m_Input.m_Jump = 0;
+				PassedFreeze1 = true;
+			}
+			else
+			{
+				CheckCore1.m_Input = m_aInputData[Dummy];
+			}
+			vec2 Prev = CheckCore1.m_Pos;
+			CheckCore1.Tick(true);
+			CheckCore1.Move();
+			CheckCore1.Quantize();
+
+			const int Steps = maximum(1, (int)(distance(Prev, CheckCore1.m_Pos) / 4.0f));
+			for(int s = 1; s <= Steps; ++s)
+			{
+				vec2 Pt = mix(Prev, CheckCore1.m_Pos, (float)s / (float)Steps);
+				if(AvoidDangerClass(Pt.x, Pt.y) >= 1)
+					PassedFreeze1 = true;
+			}
+		}
+
+		TargetPos1 = CheckCore1.m_Pos;
+		Valid1 = PassedFreeze1 && (AvoidDangerClass(TargetPos1.x, TargetPos1.y) == 0);
+
+		// Simulate forward from the edge for 2-bounce (BounceDelayTicks * 2)
+		if(g_Config.m_TcAntiVoidLaserMaxBounces >= 2)
+		{
+			const int TwoBounceTicks = BounceDelayTicks * 2;
+			CCharacterCore CheckCore2 = GameClient()->m_PredictedChar;
+			CheckCore2.Init(nullptr, Collision());
+			CheckCore2.SetHookedPlayer(-1);
+			bool PassedFreeze2 = (AvoidDangerClass(CharPos.x, CharPos.y) >= 1);
+
+			for(int t = 1; t <= TwoBounceTicks; ++t)
+			{
+				if(PassedFreeze2 || (EnterFreezeTick >= 0 && t >= EnterFreezeTick))
+				{
+					CheckCore2.m_Input.m_Direction = 0;
+					CheckCore2.m_Input.m_Hook = 0;
+					CheckCore2.m_Input.m_Jump = 0;
+					PassedFreeze2 = true;
+				}
+				else
+				{
+					CheckCore2.m_Input = m_aInputData[Dummy];
+				}
+				vec2 Prev = CheckCore2.m_Pos;
+				CheckCore2.Tick(true);
+				CheckCore2.Move();
+				CheckCore2.Quantize();
+
+				const int Steps = maximum(1, (int)(distance(Prev, CheckCore2.m_Pos) / 4.0f));
+				for(int s = 1; s <= Steps; ++s)
+				{
+					vec2 Pt = mix(Prev, CheckCore2.m_Pos, (float)s / (float)Steps);
+					if(AvoidDangerClass(Pt.x, Pt.y) >= 1)
+						PassedFreeze2 = true;
+				}
+			}
+
+			TargetPos2 = CheckCore2.m_Pos;
+			Valid2 = PassedFreeze2 && (AvoidDangerClass(TargetPos2.x, TargetPos2.y) == 0);
+		}
+	}
+
+	// Arm laser ahead of time (within 10 ticks before freeze)
+	const bool DangerInArm = (EnterFreezeTick >= 0 && EnterFreezeTick <= BounceDelayTicks + 4) || ReadyToEdgeFire;
+
+	if(DangerInArm)
+	{
+		const int ActiveWeapon = GameClient()->m_PredictedChar.m_ActiveWeapon;
+		if(m_aAntiVoidLaserPrevWeapon[Dummy] < 0 && ActiveWeapon != WEAPON_LASER)
+			m_aAntiVoidLaserPrevWeapon[Dummy] = ActiveWeapon;
+
+		// Switch weapon to Laser ahead of time
+		m_aInputData[Dummy].m_WantedWeapon = WEAPON_LASER + 1;
+
+		const bool LaserReady = (ActiveWeapon == WEAPON_LASER);
+
+		if(ReadyToEdgeFire && (Valid1 || Valid2) && LaserReady && m_aAntiVoidLaserCooldown[Dummy] == 0 && (m_aInputData[Dummy].m_Fire & 1) == 0)
+		{
+			vec2 AimDir;
+			float DistToWall = 0.0f;
+			vec2 BouncePos(0.0f, 0.0f);
+			vec2 ReflDir(0.0f, 0.0f);
+			float TeeHitOffset = 0.0f;
+			int Bounces = 0;
+			int ArrivalTicks = 0;
+
+			bool Found = FindLaserSelfBounce(TargetPos1, Valid1, TargetPos2, Valid2, AimDir, DistToWall, BouncePos, ReflDir, TeeHitOffset, Bounces, ArrivalTicks, BounceDelayTicks);
+
+			if(Found)
+			{
+				const vec2 Aim = normalize(AimDir) * 1000.0f; // 1000px length for extreme angular precision
+				m_aInputData[Dummy].m_TargetX = (int)Aim.x;
+				m_aInputData[Dummy].m_TargetY = (int)Aim.y;
+				if(!m_aInputData[Dummy].m_TargetX && !m_aInputData[Dummy].m_TargetY)
+					m_aInputData[Dummy].m_TargetX = 1;
+
+				m_aInputData[Dummy].m_Fire++;
+				m_aAntiVoidLaserFireValue[Dummy] = m_aInputData[Dummy].m_Fire;
+				m_aAntiVoidLaserReleasePending[Dummy] = true;
+				m_aAntiVoidLaserCooldown[Dummy] = maximum(35, ArrivalTicks + 15);
+
+				// Start in-flight rescue tracker
+				m_aLaserTracker[Dummy].m_Active = true;
+				m_aLaserTracker[Dummy].m_FireTick = CurrentTick;
+				m_aLaserTracker[Dummy].m_ArrivalTick = CurrentTick + ArrivalTicks;
+				m_aLaserTracker[Dummy].m_FirePos = CharPos;
+				m_aLaserTracker[Dummy].m_TargetPos = (Bounces == 1 ? TargetPos1 : TargetPos2);
+				m_aLaserTracker[Dummy].m_WallPos = BouncePos;
+				m_aLaserTracker[Dummy].m_ReflDir = ReflDir;
+				m_aLaserTracker[Dummy].m_DistToWall = DistToWall;
+				m_aLaserTracker[Dummy].m_TeeHitOffset = TeeHitOffset;
+				m_aLaserTracker[Dummy].m_Bounces = Bounces;
+
+				if(g_Config.m_TcAntiVoidLaserDebug >= 1)
+				{
+					const float AngleDeg = std::atan2(AimDir.y, AimDir.x) * 180.0f / pi;
+					log_info("laser_ricochet", "!! PERFECT EDGE RESCUE SHOT at wall (%.0f, %.0f) [bounces=%d, dist=%.1fpx, angle=%.1f°] -> will strike tee in SAFE AIR at (%.0f, %.0f) in %d ticks (offset=%.2fpx)",
+						BouncePos.x, BouncePos.y, Bounces, DistToWall, AngleDeg, m_aLaserTracker[Dummy].m_TargetPos.x, m_aLaserTracker[Dummy].m_TargetPos.y, ArrivalTicks, TeeHitOffset);
+				}
+			}
+			else if(g_Config.m_TcAntiVoidLaserDebug >= 2)
+			{
+				log_info("laser_ricochet", "ready to fire at edge but no unblocked bounce path found");
+			}
+		}
+		else if(g_Config.m_TcAntiVoidLaserDebug >= 2)
+		{
+			log_info("laser_ricochet", "arming laser: ready=%d ready_edge=%d (valid1=%d, valid2=%d, enter_tick=%d)", LaserReady, ReadyToEdgeFire, Valid1, Valid2, EnterFreezeTick);
+		}
+	}
+	else if(m_aAntiVoidLaserPrevWeapon[Dummy] >= 0 && !DangerInArm && !m_aAntiVoidLaserReleasePending[Dummy])
+	{
+		const int Prev = m_aAntiVoidLaserPrevWeapon[Dummy];
+		const int Active = GameClient()->m_PredictedChar.m_ActiveWeapon;
+		if(Active == WEAPON_LASER && Prev != WEAPON_LASER && Prev >= 0)
+		{
+			m_aInputData[Dummy].m_WantedWeapon = Prev + 1;
+		}
+		else
+		{
+			if(g_Config.m_TcAntiVoidLaserDebug >= 1 && Prev >= 0 && Prev != WEAPON_LASER)
+				log_info("laser_ricochet", "safe again: restored weapon %d", Prev);
+			m_aAntiVoidLaserPrevWeapon[Dummy] = -1;
+		}
 	}
 }
 

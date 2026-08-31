@@ -85,6 +85,8 @@ public:
 	void AvoidReportOutcome(const char *pWhat) const; // one line: what happened, where, and how long after the last decision
 	void ApplyAntiVoid(); // modifies m_aInputData[g_Config.m_ClDummy]
 	void ApplyAntiVoidRocket(bool Suppressed = false); // rocket (grenade) counter; runs independently of the braking anti-void. Suppressed: do upkeep (release fire, tick cooldown) but don't arm/fire
+	void ApplyAntiVoidLaser(bool Suppressed = false); // laser self-ricochet counter; runs independently of the braking anti-void
+	bool FindLaserSelfBounce(vec2 TargetPos1, bool Valid1, vec2 TargetPos2, bool Valid2, vec2 &OutAimDir, float &OutDistToWall, vec2 &OutBouncePos, vec2 &OutReflDir, float &OutTeeHitOffset, int &OutBounces, int &OutArrivalTicks, int BounceDelayTicks) const;
 	// True if our own tee is still on the map (normal play, or paused/spectating). The client leaves
 	// m_pLocalCharacter null in spec, so we also accept an active local character item in the snapshot.
 	bool HaveLocalChar() const;
@@ -119,6 +121,25 @@ public:
 	bool m_aAntiVoidRocketReleasePending[NUM_DUMMIES] = {false, false}; // we pressed fire last tick and must release it
 	int m_aAntiVoidRocketFireValue[NUM_DUMMIES] = {0, 0}; // the m_Fire value we set, so we only release our own press
 	int m_aAntiVoidRocketPrevWeapon[NUM_DUMMIES] = {-1, -1}; // weapon to switch back to once the rocket save is done (-1 = none)
+	int m_aAntiVoidLaserCooldown[NUM_DUMMIES] = {0, 0}; // ticks left before the laser counter may fire again
+	bool m_aAntiVoidLaserReleasePending[NUM_DUMMIES] = {false, false}; // we pressed fire last tick and must release it
+	int m_aAntiVoidLaserFireValue[NUM_DUMMIES] = {0, 0}; // the m_Fire value we set, so we only release our own press
+	int m_aAntiVoidLaserPrevWeapon[NUM_DUMMIES] = {-1, -1}; // weapon to switch back to once the laser save is done (-1 = none)
+
+	struct CRescueLaserTracker
+	{
+		bool m_Active = false;
+		int m_FireTick = -1;
+		int m_ArrivalTick = -1;
+		vec2 m_FirePos = vec2(0.0f, 0.0f);
+		vec2 m_TargetPos = vec2(0.0f, 0.0f);
+		vec2 m_WallPos = vec2(0.0f, 0.0f);
+		vec2 m_ReflDir = vec2(0.0f, 0.0f);
+		float m_DistToWall = 0.0f;
+		float m_TeeHitOffset = 0.0f;
+		int m_Bounces = 0;
+	};
+	CRescueLaserTracker m_aLaserTracker[NUM_DUMMIES];
 
 	// TClient weapon spinner. Single source of truth for the spin angle so the local visual
 	// (players.cpp) and the optional "real" sent aim (SnapInput) always agree.

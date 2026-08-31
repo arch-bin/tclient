@@ -315,6 +315,13 @@ MACRO_CONFIG_INT(TcAntiVoidRocketDistance, tc_anti_void_rocket_distance, 10, 1, 
 MACRO_CONFIG_INT(TcAntiVoidRocketCooldown, tc_anti_void_rocket_cooldown, 1, 1, 100, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Anti-void rocket: minimum ticks between auto-fired rockets so it doesn't dump all your ammo at once")
 MACRO_CONFIG_INT(TcAntiVoidRocketAimVoid, tc_anti_void_rocket_aim_void, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Anti-void rocket aiming: 1 = aim at the nearest void in the direction you're moving (fires up at a ceiling void even while drifting sideways); 0 = fire straight along your velocity vector (inertia)")
 
+// Anti-void: laser self-ricochet counter
+MACRO_CONFIG_INT(TcAntiVoidLaser, tc_anti_void_laser, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Anti-void: if you have the laser rifle, auto-fire at the nearest wall so the laser ricochets back into you to save you from death/void")
+MACRO_CONFIG_INT(TcAntiVoidLaserDistance, tc_anti_void_laser_distance, 10, 1, 32000, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Anti-void laser: how close to the void before it fires (the firing 'timing'), stored in HUNDREDTHS of a pixel so 100 = 1px (320px = 1 tile is value 32000); min 1 = 0.01px")
+MACRO_CONFIG_INT(TcAntiVoidLaserCooldown, tc_anti_void_laser_cooldown, 1, 1, 100, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Anti-void laser: minimum ticks between auto-fired lasers")
+MACRO_CONFIG_INT(TcAntiVoidLaserMaxBounces, tc_anti_void_laser_max_bounces, 2, 1, 5, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Anti-void laser: max bounces to calculate for self-ricochet (1 = 1-wall direct bounce, 2 = up to 2 bounces)")
+MACRO_CONFIG_INT(TcAntiVoidLaserDebug, tc_anti_void_laser_debug, 1, 0, 2, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Anti-void laser debug log: 1 = detailed report on detection and firing, 2 = verbose scan logs every tick")
+
 // Weapon spinner (visual only, off by default; does NOT affect aim/hook/fire)
 MACRO_CONFIG_INT(TcWeaponSpin, tc_weapon_spin, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Visually spin the weapon sprite (cosmetic only, does not affect your real aim, hook or fire direction)")
 MACRO_CONFIG_INT(TcWeaponSpinMode, tc_weapon_spin_mode, 0, 0, 7, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Weapon spinner mode: 0=spin CW, 1=spin CCW, 2=pendulum, 3=random flicks, 4=jitter, 5=snap 8-dir, 6=random drift, 7=chaos")

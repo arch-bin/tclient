@@ -3351,6 +3351,16 @@ void CMenus::RenderSettingsMyForkAntiVoid(CUIRect MainView)
 		}
 	}
 
+	// Laser Ricochet counter: auto-fires laser to bounce off nearest wall back into self on danger
+	{
+		CUIRect Card = BeginCard(&RightCol, "Laser Ricochet", (g_Config.m_TcAntiVoidLaser ? 2.0f : 1.0f) * LineSize);
+		DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoidLaser, "Self-ricochet laser on danger", &g_Config.m_TcAntiVoidLaser, &Card, LineSize);
+		if(g_Config.m_TcAntiVoidLaser)
+		{
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_TcAntiVoidLaserDebug, "Detailed debug logs in console", &g_Config.m_TcAntiVoidLaserDebug, &Card, LineSize);
+		}
+	}
+
 	// Visuals
 	{
 		CUIRect Card = BeginCard(&RightCol, "Visuals", 2.0f * LineSize);

@@ -1917,7 +1917,7 @@ bool CControls::FindLaserSelfBounce(vec2 TargetPos1, bool Valid1, vec2 TargetPos
 						float Offset2 = distance(TargetPos2, ClosestPt2);
 						if(Offset2 < R)
 						{
-							vCandidates.push_back({Angle, Dir0, Dist0, BounceHitPos0, Dir2, Offset2, 2, BounceDelayTicks * 2, TargetPos2});
+							vCandidates.push_back({Angle, Dir0, Dist0, BounceHitPos1, Dir2, Offset2, 2, BounceDelayTicks * 2, TargetPos2});
 						}
 					}
 				}

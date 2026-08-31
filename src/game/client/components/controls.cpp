@@ -2109,10 +2109,16 @@ void CControls::ApplyAntiVoidLaser(bool Suppressed)
 		if(m_aAntiVoidLaserPrevWeapon[Dummy] >= 0 && !m_aAntiVoidLaserReleasePending[Dummy])
 		{
 			const int Prev = m_aAntiVoidLaserPrevWeapon[Dummy];
-			if(GameClient()->m_PredictedChar.m_ActiveWeapon == WEAPON_LASER && Prev != WEAPON_LASER && Prev >= 0)
+			if(Prev >= 0 && Prev != WEAPON_LASER)
+			{
 				m_aInputData[Dummy].m_WantedWeapon = Prev + 1;
+				if(GameClient()->m_PredictedChar.m_ActiveWeapon == Prev)
+					m_aAntiVoidLaserPrevWeapon[Dummy] = -1;
+			}
 			else
+			{
 				m_aAntiVoidLaserPrevWeapon[Dummy] = -1;
+			}
 		}
 		return;
 	}
@@ -2336,15 +2342,18 @@ void CControls::ApplyAntiVoidLaser(bool Suppressed)
 	else if(m_aAntiVoidLaserPrevWeapon[Dummy] >= 0 && !DangerInArm && !m_aAntiVoidLaserReleasePending[Dummy])
 	{
 		const int Prev = m_aAntiVoidLaserPrevWeapon[Dummy];
-		const int Active = GameClient()->m_PredictedChar.m_ActiveWeapon;
-		if(Active == WEAPON_LASER && Prev != WEAPON_LASER && Prev >= 0)
+		if(Prev >= 0 && Prev != WEAPON_LASER)
 		{
 			m_aInputData[Dummy].m_WantedWeapon = Prev + 1;
+			if(GameClient()->m_PredictedChar.m_ActiveWeapon == Prev)
+			{
+				if(g_Config.m_TcAntiVoidLaserDebug >= 1)
+					log_info("laser_ricochet", "safe again: restored weapon %d", Prev);
+				m_aAntiVoidLaserPrevWeapon[Dummy] = -1;
+			}
 		}
 		else
 		{
-			if(g_Config.m_TcAntiVoidLaserDebug >= 1 && Prev >= 0 && Prev != WEAPON_LASER)
-				log_info("laser_ricochet", "safe again: restored weapon %d", Prev);
 			m_aAntiVoidLaserPrevWeapon[Dummy] = -1;
 		}
 	}

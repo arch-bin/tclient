@@ -618,6 +618,7 @@ void CControls::ApplyAutoSafety()
 		m_aRescueHookHold[g_Config.m_ClDummy] = 0;
 		m_aRescueHookThrown[g_Config.m_ClDummy] = false;
 		m_aRescueHookHeld[g_Config.m_ClDummy] = false;
+		ApplyAntiVoidLaser(true);
 		return;
 	}
 
@@ -2024,6 +2025,23 @@ bool CControls::FindLaserSelfBounce(vec2 TargetPos1, bool Valid1, vec2 TargetPos
 	return true;
 }
 
+// Check if the full 28px tee hitbox has zero intersection with freeze/death tiles.
+bool CControls::TeeFullyClearOfFreeze(vec2 Pos) const
+{
+	const float R = 28.0f;
+	if(AvoidDangerClassPoint(Pos.x, Pos.y) != 0)
+		return false;
+	for(int i = 0; i < 8; ++i)
+	{
+		const float A = (float)i / 8.0f * 2.0f * pi;
+		const float Px = Pos.x + cos(A) * R;
+		const float Py = Pos.y + sin(A) * R;
+		if(AvoidDangerClassPoint(Px, Py) != 0)
+			return false;
+	}
+	return true;
+}
+
 // Laser self-ricochet counter: fires laser at the nearest wall so it ricochets back into the player as they emerge from freeze.
 void CControls::ApplyAntiVoidLaser(bool Suppressed)
 {
@@ -2204,7 +2222,7 @@ void CControls::ApplyAntiVoidLaser(bool Suppressed)
 		}
 
 		TargetPos1 = CheckCore1.m_Pos;
-		Valid1 = PassedFreeze1 && (AvoidDangerClass(TargetPos1.x, TargetPos1.y) == 0);
+		Valid1 = PassedFreeze1 && TeeFullyClearOfFreeze(TargetPos1);
 
 		// Simulate forward from the edge for 2-bounce (BounceDelayTicks * 2)
 		if(g_Config.m_TcAntiVoidLaserMaxBounces >= 2)
@@ -2243,7 +2261,7 @@ void CControls::ApplyAntiVoidLaser(bool Suppressed)
 			}
 
 			TargetPos2 = CheckCore2.m_Pos;
-			Valid2 = PassedFreeze2 && (AvoidDangerClass(TargetPos2.x, TargetPos2.y) == 0);
+			Valid2 = PassedFreeze2 && TeeFullyClearOfFreeze(TargetPos2);
 		}
 	}
 

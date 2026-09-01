@@ -319,7 +319,6 @@ MACRO_CONFIG_INT(TcAntiVoidRocketAimVoid, tc_anti_void_rocket_aim_void, 0, 0, 1,
 MACRO_CONFIG_INT(TcAntiVoidLaser, tc_anti_void_laser, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Anti-void: if you have the laser rifle, auto-fire at the nearest wall so the laser ricochets back into you to save you from death/void")
 MACRO_CONFIG_INT(TcAntiVoidLaserDistance, tc_anti_void_laser_distance, 10, 1, 32000, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Anti-void laser: how close to the void before it fires (the firing 'timing'), stored in HUNDREDTHS of a pixel so 100 = 1px (320px = 1 tile is value 32000); min 1 = 0.01px")
 MACRO_CONFIG_INT(TcAntiVoidLaserCooldown, tc_anti_void_laser_cooldown, 1, 1, 100, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Anti-void laser: minimum ticks between auto-fired lasers")
-MACRO_CONFIG_INT(TcAntiVoidLaserMaxBounces, tc_anti_void_laser_max_bounces, 2, 1, 5, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Anti-void laser: max bounces to calculate for self-ricochet (1 = 1-wall direct bounce, 2 = up to 2 bounces)")
 MACRO_CONFIG_INT(TcAntiVoidLaserDebug, tc_anti_void_laser_debug, 1, 0, 2, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Anti-void laser debug log: 1 = detailed report on detection and firing, 2 = verbose scan logs every tick")
 
 // Weapon spinner (visual only, off by default; does NOT affect aim/hook/fire)

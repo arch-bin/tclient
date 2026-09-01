@@ -85,8 +85,10 @@ public:
 	void AvoidReportOutcome(const char *pWhat) const; // one line: what happened, where, and how long after the last decision
 	void ApplyAntiVoid(); // modifies m_aInputData[g_Config.m_ClDummy]
 	void ApplyAntiVoidRocket(bool Suppressed = false); // rocket (grenade) counter; runs independently of the braking anti-void. Suppressed: do upkeep (release fire, tick cooldown) but don't arm/fire
+	static constexpr int MAX_LASER_BOUNCES = 12;
 	void ApplyAntiVoidLaser(bool Suppressed = false); // laser self-ricochet counter; runs independently of the braking anti-void
-	bool FindLaserSelfBounce(vec2 TargetPos1, bool Valid1, vec2 TargetPos2, bool Valid2, vec2 &OutAimDir, float &OutDistToWall, vec2 &OutBouncePos, vec2 &OutReflDir, float &OutTeeHitOffset, int &OutBounces, int &OutArrivalTicks, int BounceDelayTicks) const;
+	int TraceLaserPath(vec2 From, vec2 AimDir, int MaxBounces, vec2 *pSegStart, vec2 *pSegEnd) const;
+	bool FindLaserSelfBounce(const vec2 *pTargetPos, const bool *pValid, int MaxBounces, int BounceDelayTicks, vec2 &OutAimDir, float &OutDistToWall, vec2 &OutBouncePos, vec2 &OutReflDir, float &OutTeeHitOffset, int &OutBounces, int &OutArrivalTicks) const;
 	bool TeeFullyClearOfFreeze(vec2 Pos) const; // true if the full 28px tee body has zero intersection with freeze/death tiles
 	// True if our own tee is still on the map (normal play, or paused/spectating). The client leaves
 	// m_pLocalCharacter null in spec, so we also accept an active local character item in the snapshot.

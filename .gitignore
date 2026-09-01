@@ -148,6 +148,8 @@ tags
 # local fork housekeeping: backups, packaged builds and saved settings never belong in the repo
 /avoid_backup_*/
 /tclient_bak_*/
+/dist-linux/
+/dist-linux.zip
 /dist-windows/
 /dist-windows.zip
 /build-windows/

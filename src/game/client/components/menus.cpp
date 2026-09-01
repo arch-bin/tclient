@@ -1216,6 +1216,41 @@ void CMenus::Render()
 
 void CMenus::RenderPopupFullscreen(CUIRect Screen)
 {
+	if(m_Popup == POPUP_MYFORK)
+	{
+		Screen.Draw(ColorRGBA(0.0f, 0.0f, 0.0f, 0.65f), IGraphics::CORNER_NONE, 0.0f);
+
+		CUIRect Box, Header, Title, CloseButton;
+		Box = Screen;
+		Box.VMargin(20.0f, &Box);
+		Box.HMargin(15.0f, &Box);
+		Box.Draw(ColorRGBA(0.0f, 0.0f, 0.0f, 0.75f), IGraphics::CORNER_ALL, 12.0f);
+
+		Box.Margin(12.0f, &Box);
+
+		// Header bar with Title and Close button
+		Box.HSplitTop(24.0f, &Header, &Box);
+		Header.VSplitLeft(200.0f, &Title, &Header);
+		Header.VSplitRight(120.0f, &Header, &CloseButton);
+
+		TextRender()->TextColor(1.0f, 0.8f, 0.3f, 1.0f);
+		Ui()->DoLabel(&Title, "TClient+", 18.0f, TEXTALIGN_ML);
+		TextRender()->TextColor(1.0f, 1.0f, 1.0f, 1.0f);
+
+		static CButtonContainer s_CloseButton;
+		if(DoButton_Menu(&s_CloseButton, Localize("Close"), 0, &CloseButton) || Ui()->ConsumeHotkey(CUi::HOTKEY_ESCAPE))
+		{
+			m_Popup = POPUP_NONE;
+			if(Client()->State() == IClient::STATE_ONLINE)
+				SetActive(false);
+		}
+
+		Box.HSplitTop(8.0f, nullptr, &Box);
+
+		RenderSettingsMyFork(Box);
+		return;
+	}
+
 	char aBuf[1536];
 	const char *pTitle = "";
 	const char *pExtraText = "";
@@ -2800,6 +2835,27 @@ void CMenus::ShowQuitPopup()
 void CMenus::ShowProxyPopup()
 {
 	m_Popup = POPUP_PROXY;
+}
+
+void CMenus::ShowMyForkPopup()
+{
+	m_Popup = POPUP_MYFORK;
+	SetActive(true);
+}
+
+void CMenus::ToggleMyForkPopup()
+{
+	if(m_Popup == POPUP_MYFORK)
+	{
+		m_Popup = POPUP_NONE;
+		if(Client()->State() == IClient::STATE_ONLINE)
+			SetActive(false);
+	}
+	else
+	{
+		m_Popup = POPUP_MYFORK;
+		SetActive(true);
+	}
 }
 
 void CMenus::JoinTutorial()

@@ -1471,7 +1471,6 @@ void CMenus::RenderSettings(CUIRect MainView)
 		Localize("DDNet"),
 		Localize("Assets"),
 		TCLocalize("TClient"),
-		"My Fork",
 		Localize("Profiles"),
 		Localize("Configs")};
 
@@ -1542,11 +1541,6 @@ void CMenus::RenderSettings(CUIRect MainView)
 	{
 		GameClient()->m_MenuBackground.ChangePosition(13);
 		RenderSettingsTClient(MainView);
-	}
-	else if(g_Config.m_UiSettingsPage == SETTINGS_MYFORK)
-	{
-		GameClient()->m_MenuBackground.ChangePosition(13);
-		RenderSettingsMyFork(MainView);
 	}
 	else if(g_Config.m_UiSettingsPage == SETTINGS_PROFILES)
 	{

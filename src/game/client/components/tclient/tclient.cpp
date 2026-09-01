@@ -427,6 +427,11 @@ void CTClient::ConWeaponSpinModeNext(IConsole::IResult *pResult, void *pUserData
 	((CTClient *)pUserData)->GameClient()->Echo(aBuf);
 }
 
+void CTClient::ConToggleMenu(IConsole::IResult *pResult, void *pUserData)
+{
+	((CTClient *)pUserData)->GameClient()->m_Menus.ToggleMyForkPopup();
+}
+
 void CTClient::ConCalc(IConsole::IResult *pResult, void *pUserData)
 {
 	int Error = 0;
@@ -466,6 +471,8 @@ void CTClient::OnConsoleInit()
 		this);
 	Console()->Register("tc_weapon_spin_toggle", "", CFGFLAG_CLIENT, ConWeaponSpinToggle, this, "Toggle the weapon spinner on/off (bindable)");
 	Console()->Register("tc_weapon_spin_mode_next", "", CFGFLAG_CLIENT, ConWeaponSpinModeNext, this, "Cycle to the next weapon spinner mode (bindable)");
+	Console()->Register("tc_toggle_menu", "", CFGFLAG_CLIENT, ConToggleMenu, this, "Toggle the cheat menu (F12)");
+	Console()->Register("tc_menu", "", CFGFLAG_CLIENT, ConToggleMenu, this, "Toggle the cheat menu (F12)");
 
 	Console()->Register("tc_random_player", "s[type]", CFGFLAG_CLIENT, ConRandomTee, this, "Randomize player color (0 = all, 1 = body, 2 = feet, 3 = skin, 4 = flag) example: 0011 = randomize skin and flag [number is position]");
 	Console()->Chain("tc_random_player", ConchainRandomColor, this);

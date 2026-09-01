@@ -20,6 +20,15 @@ bool CBinds::CBindsSpecial::OnInput(const IInput::CEvent &Event)
 	if((Event.m_Flags & (IInput::FLAG_PRESS | IInput::FLAG_RELEASE)) == 0)
 		return false;
 
+	if(Event.m_Key == KEY_F12)
+	{
+		if((Event.m_Flags & IInput::FLAG_PRESS) && !(Event.m_Flags & IInput::FLAG_REPEAT))
+		{
+			GameClient()->m_Menus.ToggleMyForkPopup();
+		}
+		return true;
+	}
+
 	// only handle F and composed F binds
 	// do not handle F5 bind while menu is active
 	if(((Event.m_Key >= KEY_F1 && Event.m_Key <= KEY_F12) || (Event.m_Key >= KEY_F13 && Event.m_Key <= KEY_F24)) &&
@@ -322,6 +331,7 @@ void CBinds::SetDefaults()
 	Bind(KEY_F3, "vote yes");
 	Bind(KEY_F4, "vote no");
 	Bind(KEY_F10, "screenshot");
+	Bind(KEY_F12, "tc_toggle_menu");
 
 	Bind(KEY_MINUS, "spectate_previous");
 	Bind(KEY_EQUALS, "spectate_next");
@@ -555,6 +565,7 @@ void CBinds::SetDDRaceBinds(bool FreeOnly)
 		Bind(KEY_KP_5, "say /emote blink 999999", FreeOnly);
 		Bind(KEY_MINUS, "spectate_previous", FreeOnly);
 		Bind(KEY_EQUALS, "spectate_next", FreeOnly);
+		Bind(KEY_F12, "tc_toggle_menu", FreeOnly);
 	}
 
 	if(g_Config.m_ClDDRaceBindsSet < 2)

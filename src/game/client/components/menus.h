@@ -707,7 +707,6 @@ public:
 		SETTINGS_DDNET,
 		SETTINGS_ASSETS,
 		SETTINGS_TCLIENT,
-		SETTINGS_MYFORK,
 		SETTINGS_PROFILES,
 		SETTINGS_CONFIGS,
 
@@ -827,6 +826,7 @@ public:
 		POPUP_WARNING,
 		POPUP_SAVE_SKIN,
 		POPUP_PROXY, // TClient: SOCKS5 proxy configuration on the start page
+		POPUP_MYFORK, // TClient+: cheat settings menu (F12)
 	};
 
 	enum
@@ -842,6 +842,8 @@ public:
 	void SetShowStart(bool ShowStart);
 	void ShowQuitPopup();
 	void ShowProxyPopup();
+	void ShowMyForkPopup();
+	void ToggleMyForkPopup();
 	void JoinTutorial();
 
 private:

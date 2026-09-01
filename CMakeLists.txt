@@ -2354,6 +2354,8 @@ set_src(GAME_SHARED GLOB src/game
   prng.cpp
   prng.h
   race_state.h
+  rocket_save.cpp
+  rocket_save.h
   team_state.h
   teamscore.cpp
   teamscore.h

@@ -13,12 +13,19 @@ CFreezeWallTuning CFreezeWall::ms_Tuning;
 
 bool CFreezeWall::FreezeAt(CCollision *pCollision, float x, float y, const CFreezeWallCfg &Cfg)
 {
-	const int Tx = (int)(x / 32.0f);
-	const int Ty = (int)(y / 32.0f);
+	const int Tx = (int)std::floor(x / 32.0f);
+	const int Ty = (int)std::floor(y / 32.0f);
 	if(Tx < 0 || Ty < 0 || Tx >= pCollision->GetWidth() || Ty >= pCollision->GetHeight())
 		return false; // off-map is a hard death, handled by HardDeath, not as freeze
-	const int Index = pCollision->GetPureMapIndex(x, y);
-	for(const int T : {pCollision->GetTileIndex(Index), pCollision->GetFrontTileIndex(Index)})
+	const int Index = Ty * pCollision->GetWidth() + Tx;
+	if(Index < 0 || Index >= pCollision->GetWidth() * pCollision->GetHeight())
+		return false;
+	const int aTiles[] = {
+		pCollision->GetTileIndex(Index),
+		pCollision->GetFrontTileIndex(Index),
+		pCollision->GetSwitchType(Index)
+	};
+	for(const int T : aTiles)
 		if((Cfg.m_Freeze && T == TILE_FREEZE) || (Cfg.m_DeepFreeze && T == TILE_DFREEZE) || (Cfg.m_LiveFreeze && T == TILE_LFREEZE))
 			return true;
 	return false;
@@ -34,14 +41,21 @@ static bool HardDeath(CCollision *pCollision, float x, float y, const CFreezeWal
 		{
 			const float Px = x + Ox;
 			const float Py = y + Oy;
-			const int Tx = (int)(Px / 32.0f);
-			const int Ty = (int)(Py / 32.0f);
+			const int Tx = (int)std::floor(Px / 32.0f);
+			const int Ty = (int)std::floor(Py / 32.0f);
 			if(Tx < 0 || Ty < 0 || Tx >= pCollision->GetWidth() || Ty >= pCollision->GetHeight())
 				return true;
-			const int Index = pCollision->GetPureMapIndex(Px, Py);
+			const int Index = Ty * pCollision->GetWidth() + Tx;
+			if(Index < 0 || Index >= pCollision->GetWidth() * pCollision->GetHeight())
+				return true;
 			if(Cfg.m_Tele && (pCollision->IsTeleport(Index) || pCollision->IsEvilTeleport(Index)))
 				return true;
-			for(const int T : {pCollision->GetTileIndex(Index), pCollision->GetFrontTileIndex(Index)})
+			const int aTiles[] = {
+				pCollision->GetTileIndex(Index),
+				pCollision->GetFrontTileIndex(Index),
+				pCollision->GetSwitchType(Index)
+			};
+			for(const int T : aTiles)
 				if((Cfg.m_Death && T == TILE_DEATH) || (Cfg.m_DeepFreeze && T == TILE_DFREEZE))
 					return true;
 		}
@@ -142,12 +156,8 @@ int CFreezeWall::Hit(CCollision *pCollision, const CCharacterCore &Core, const C
 
 float CFreezeWall::SideDist(CCollision *pCollision, vec2 Pos, float Side, float MaxDist, float Band, const CFreezeWallCfg &Cfg)
 {
-	// Scanned at the centre and BELOW it, never above: freezing is decided by the tee's centre, so freeze
-	// overhead is something you fly under, not something in your way. The band used to reach upwards too,
-	// and a tee skimming one pixel under a freeze ceiling had that ceiling reported as a wall straight
-	// ahead — the counter-steer under the roof that would not stop.
-	for(float d = 4.0f; d <= MaxDist; d += 4.0f)
-		for(const float Oy : {0.0f, Band})
+	for(float d = 2.0f; d <= MaxDist; d += 2.0f)
+		for(const float Oy : {-12.0f, -6.0f, 0.0f, 6.0f, 12.0f})
 			if(FreezeAt(pCollision, Pos.x + Side * d, Pos.y + Oy, Cfg))
 				return d;
 	return -1.0f;
@@ -166,30 +176,39 @@ CFreezeWallDecision CFreezeWall::Decide(CCollision *pCollision, const CCharacter
 		return Out;
 	}
 
-	// Airborne only: on the ground you stop instantly yourself, so your walk is never touched.
 	const vec2 P = Core.m_Pos;
 	const float HalfSize = CCharacterCore::PhysicalSize() / 2.0f;
 	Out.m_Grounded = pCollision->CheckPoint(P.x + HalfSize, P.y + HalfSize + 5.0f) || pCollision->CheckPoint(P.x - HalfSize, P.y + HalfSize + 5.0f);
-	if(Out.m_Grounded)
+
+	// Proximity check on the side player is pressing towards: blocks walking/sliding into freeze walls
+	const int Key = Input.m_Direction;
+	if(Key != 0)
 	{
-		State.m_Latch = false;
-		Out.m_pWhy = "grounded, keys are yours";
-		return Out;
+		const float SideDistHit = SideDist(pCollision, P, (float)Key, 24.0f, ms_Tuning.m_ClampBand, Cfg);
+		if(SideDistHit >= 0.0f && SideDistHit <= 22.0f)
+		{
+			const float MovingInto = (float)Key * Core.m_Vel.x;
+			if(Cfg.m_Mode >= 2 && MovingInto > 0.5f)
+			{
+				Out.m_Dir = -Key;
+				Out.m_pWhy = "counter-steer: freeze wall right beside you";
+			}
+			else
+			{
+				Out.m_Dir = 0;
+				Out.m_pWhy = "block key: freeze wall directly in front of you";
+			}
+			State.m_Latch = true;
+			return Out;
+		}
 	}
 
 	Out.m_Raw = Hit(pCollision, Core, Input, Cfg, 0, KEEP_DIR, ms_Tuning.m_Margin, &Out.m_Pos, &Out.m_RawTick);
-	// A wall ARMS the save; that filter is what keeps it off your keys under a freeze ceiling. It must not
-	// DISARM it though: once the brake is on, freeze entered through the top or bottom face keeps it alive
-	// for a short grace window, because the log had a tee braked against one block and then carried into the
-	// next one by its own key while that second contact read as "from above".
 	if(Out.m_Raw == 1 || Out.m_Raw == 3)
 		State.m_Grace = ms_Tuning.m_GraceTicks;
 	else if(State.m_Grace > 0)
 		State.m_Grace--;
-	// ARMED means the simulation has a case for steering: a wall now, or a brake already engaged that is
-	// still inside its grace window. Anything else — no contact at all, or freeze taken through the top or
-	// bottom face (a ceiling you fly under, a floor you drop onto) — leaves the sim side silent. Only the
-	// straight-ahead clamp below may still act, and only right up against the block.
+
 	const bool Armed = Out.m_Raw == 1 || Out.m_Raw == 3 || (Out.m_Raw == 2 && WasLatched && State.m_Grace > 0);
 	if(!Armed)
 	{
@@ -200,10 +219,6 @@ CFreezeWallDecision CFreezeWall::Decide(CCollision *pCollision, const CCharacter
 	const int Counter = Core.m_Vel.x > 0.0f ? -1 : 1;
 	if(Armed)
 	{
-		// How long does each key keep us out of freeze? A candidate that never touches freeze inside the
-		// window scores the full window, otherwise it scores the tick it goes in. "Must clear it completely"
-		// was the wrong bar: in a tight freeze corridor nothing is ever clear, so the save stood down exactly
-		// where it was needed (raw contact in 3 ticks, dropping the key pushed it to 9, countering to 11).
 		auto Score = [&](int Delay, int SimDir) -> int {
 			int Tick = -1;
 			const int Res = Hit(pCollision, Core, Input, Cfg, Delay, SimDir, ms_Tuning.m_Margin, nullptr, &Tick);
@@ -211,14 +226,9 @@ CFreezeWallDecision CFreezeWall::Decide(CCollision *pCollision, const CCharacter
 		};
 		Out.m_StopScore = Score(0, 0);
 		Out.m_CounterScore = Cfg.m_Mode >= 2 ? Score(0, Counter) : -1;
-		// Mildest thing that does the job: if blocking your key alone keeps you clear for the whole window,
-		// that is the answer and the opposite key is never pressed. Otherwise take whichever lasts longest.
 		const bool UseCounter = Out.m_StopScore < ms_Tuning.m_Window && Out.m_CounterScore > Out.m_StopScore;
 		const int BestDir = UseCounter ? Counter : 0;
 		Out.m_BestScore = UseCounter ? Out.m_CounterScore : Out.m_StopScore;
-		// How far ahead "could I still brake later?" is tested. Fixed at one tick it was fine at walking
-		// speed and useless at full speed, where the state jumped straight from "the counter saves me
-		// completely" to "nothing does".
 		Out.m_LateTicks = std::clamp((int)(length(Core.m_Vel) / ms_Tuning.m_LatePerVel), ms_Tuning.m_LateTicks, ms_Tuning.m_LateMax) +
 				  (WasLatched ? ms_Tuning.m_LateHoldTicks - ms_Tuning.m_LateTicks : 0);
 		Out.m_LateScore = Score(Out.m_LateTicks, BestDir);
@@ -235,8 +245,6 @@ CFreezeWallDecision CFreezeWall::Decide(CCollision *pCollision, const CCharacter
 			Out.m_pWhy = BestDir == 0 ? "block your key" : "counter-steer: blocking the key alone does not stop you in time";
 		}
 
-		// Right up against it: never hand the key back in the last couple of ticks while the contact is
-		// still there. Blocking costs nothing — it is your own key and the contact is coming either way.
 		if(Out.m_Dir == KEEP_DIR && Out.m_RawTick <= ms_Tuning.m_GrazeTicks && Out.m_StopScore > Out.m_RawTick)
 		{
 			Out.m_Dir = 0;
@@ -244,43 +252,17 @@ CFreezeWallDecision CFreezeWall::Decide(CCollision *pCollision, const CCharacter
 		}
 	}
 
-	// LAST-RESORT CLAMP, no simulation at all: real freeze on the side you are pressing towards, at body
-	// height, within roughly your braking distance. The sim's vertical prediction is the weak link — it once
-	// had the tee rising over a block it then flew straight into, reporting nothing until 14px before the
-	// hit — so this scan is what actually guarantees the key is not driving you into freeze.
+	// LAST-RESORT CLAMP
 	if(Out.m_Dir == KEEP_DIR || Out.m_Dir == 0)
 	{
-		const int Key = Input.m_Direction;
-		// Only when that key is actually taking you TOWARDS the freeze. Holding left while flying right is
-		// braking — the log had the clamp fighting exactly that, blocking the brake because there happened
-		// to be freeze 17px to the left, on the side the tee was moving away from.
-		// ...and only while you are genuinely CLOSING on it. "There is freeze beside me" is the normal state
-		// of affairs in a gores tunnel — measuring that alone made the clamp fire in two thirds of ordinary
-		// situations. What matters is whether the current sideways speed actually carries you in.
 		const float Closing = Key != 0 ? (float)Key * Core.m_Vel.x : 0.0f;
-		const bool KeyGoesIn = Closing > ms_Tuning.m_ClosingVel;
-		// The clamp is a BACKSTOP, not the main behaviour. Given free rein it fired on everything: in a
-		// gores tunnel there is freeze within a braking distance of you almost always, and the log came back
-		// with 1527 clamp overrides against 150 from the simulation — that is the "it steers in random
-		// places" complaint. So its full reach only applies when the simulation also sees a contact; on its
-		// own it may only act when the freeze is right up against you, which is the case the sim keeps
-		// losing (a wall 9px away that the predicted path drifts around).
-		// Reach is how far that closing speed carries you in the next few ticks, so it is a time-to-contact
-		// test rather than a distance test: fast means look far, crawling means look barely at all, standing
-		// still means the clamp says nothing.
-		float Reach = std::clamp(Closing * ms_Tuning.m_ReachPerVel, 0.0f, ms_Tuning.m_ReachMax);
-		// Full reach only when the simulation agrees this is a WALL. When it says "ceiling or floor" (or sees
-		// nothing at all), the clamp may still act, but only when the freeze is right up against you — that
-		// is the case the sim genuinely loses. Giving it full reach on ceiling contacts is what kept the keys
-		// busy while flying along under a freeze roof.
+		const bool KeyGoesIn = (Key != 0) && (Closing > 0.0f || Out.m_Raw != 0);
+		float Reach = std::clamp(maximum(Closing, 1.0f) * ms_Tuning.m_ReachPerVel, 0.0f, ms_Tuning.m_ReachMax);
 		if(Out.m_Raw == 2 || Out.m_Raw == 0)
 			Reach = minimum(Reach, ms_Tuning.m_ClampPx);
 		Out.m_ClampDist = KeyGoesIn ? SideDist(pCollision, P, (float)Key, Reach, ms_Tuning.m_ClampBand, Cfg) : -1.0f;
 		if(Out.m_ClampDist >= 0.0f)
 		{
-			// Close enough that letting go no longer stops the drift: push the other way — but only while
-			// still travelling towards the block, otherwise the counter walks you back out of the spot you
-			// were trying to hold.
 			const float Into = (float)Key * Core.m_Vel.x;
 			const bool NeedCounter = Cfg.m_Mode >= 2 && Into > 0.5f &&
 						 Out.m_ClampDist < maximum(absolute(Core.m_Vel.x) * ms_Tuning.m_CounterReach, ms_Tuning.m_ClampPx);
